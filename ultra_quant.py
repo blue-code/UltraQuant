@@ -26,6 +26,14 @@ try:
 except ImportError:
     NUMBA_AVAILABLE = False
     print("⚠️ Numba 미설치. pip install numba")
+    
+    # Dummy decorators/functions for fallback
+    def jit(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+    
+    prange = range
 
 # Ray: 분산 처리로 멀티코어 활용
 try:
@@ -202,6 +210,48 @@ class FastBacktester:
         
         print(f"⏱️ {n_runs}회 실행 시간: {elapsed:.3f}초 ({n_runs/elapsed:.1f} runs/sec)")
         return elapsed
+
+
+class MonteCarloSimulator:
+    """
+    몬테카를로 시뮬레이터
+    
+    수익률 분포를 기반으로 미래 자산 경로를 시뮬레이션하여 리스크를 측정합니다.
+    (VaR, CVaR 계산)
+    """
+    
+    def __init__(self, n_simulations: int = 1000, horizon: int = 252):
+        self.n_simulations = n_simulations
+        self.horizon = horizon
+
+    def run_simulation(self, daily_returns: pd.Series, initial_capital: float) -> np.ndarray:
+        """수익률 리샘플링을 통한 시뮬레이션"""
+        returns = daily_returns.dropna().values
+        if len(returns) == 0:
+            return np.zeros((self.n_simulations, self.horizon))
+
+        # 리샘플링 (Bootstrap)
+        sim_returns = np.random.choice(returns, size=(self.n_simulations, self.horizon))
+        
+        # 자산 경로 계산
+        paths = initial_capital * np.cumprod(1 + sim_returns, axis=1)
+        return paths
+
+    def analyze_risk(self, paths: np.ndarray) -> dict:
+        """시뮬레이션 결과 분석 (VaR 95%, CVaR 95%)"""
+        final_values = paths[:, -1]
+        returns = (final_values / paths[0, 0]) - 1
+        
+        var_95 = np.percentile(returns, 5)
+        cvar_95 = returns[returns <= var_95].mean()
+        
+        return {
+            'mean_return': np.mean(returns),
+            'median_return': np.median(returns),
+            'var_95': var_95,
+            'cvar_95': cvar_95,
+            'prob_loss': np.mean(returns < 0)
+        }
 
 
 # ============================================
@@ -692,6 +742,20 @@ class UltraQuantSystem:
         
         return results
     
+    def run_risk_analysis(self, daily_returns: pd.Series, initial_capital: float = 100000):
+        """몬테카를로 리스크 분석 실행"""
+        print("\n🎲 몬테카를로 리스크 분석 중...")
+        mc = MonteCarloSimulator(n_simulations=5000, horizon=252)
+        paths = mc.run_simulation(daily_returns, initial_capital)
+        stats = mc.analyze_risk(paths)
+        
+        print(f"  • Expected Return (1y): {stats['mean_return']:.1%}")
+        print(f"  • Value at Risk (95%): {stats['var_95']:.1%}")
+        print(f"  • Cond. VaR (95%): {stats['cvar_95']:.1%}")
+        print(f"  • Probability of Loss: {stats['prob_loss']:.1%}")
+        
+        return stats
+
     def _load_data(self, symbol: str) -> pd.DataFrame:
         """데이터 로드"""
         import yfinance as yf
