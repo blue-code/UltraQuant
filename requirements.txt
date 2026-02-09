@@ -4,3 +4,4 @@ yfinance
 scipy
 matplotlib
 seaborn
+scikit-learn

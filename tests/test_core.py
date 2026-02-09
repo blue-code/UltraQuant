@@ -48,5 +48,22 @@ class TestUltraQuant(unittest.TestCase):
         self.assertTrue(len(results) > 0)
         self.assertIn('oos_sharpe', results[0])
 
+    def test_advanced_strategies(self):
+        """최신 고급 전략 테스트 (ML, Regime, Liquidity)"""
+        from strategy import StrategyBacktester, StrategySignals
+        backtester = StrategyBacktester()
+        
+        # 1. ML Ensemble
+        res_ml = backtester.run_backtest(self.df, StrategySignals.ml_ensemble_signals({'lookback': 100}))
+        self.assertIn('Total Return', res_ml.metrics)
+        
+        # 2. Regime Switching
+        res_regime = backtester.run_backtest(self.df, StrategySignals.regime_switching_signals({}))
+        self.assertIn('Total Return', res_regime.metrics)
+        
+        # 3. Liquidity Sweep
+        res_sweep = backtester.run_backtest(self.df, StrategySignals.liquidity_sweep_signals({}))
+        self.assertIn('Total Return', res_sweep.metrics)
+
 if __name__ == '__main__':
     unittest.main()

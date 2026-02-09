@@ -154,13 +154,18 @@ broker.place_order(order)
 | 7 | **Dual Thrust** | 변동성 | 전일 고저차 기반 데이트레이딩 |
 | 8 | **Volatility Breakout** | 변동성 | 변동성 돌파 전략 (Larry Williams) |
 | 9 | **MA Cross** | 추세추종 | 이동평균선 골든/데드크로스 |
+| 10 | **ML Ensemble** | 머신러닝 | RF Classifier 기반 방향성 확률 예측 |
+| 11 | **Regime Switching** | 하이브리드 | 변동성 기반 추세/평균회귀 자동 전환 |
+| 12 | **Liquidity Sweep** | 시장 구조 | 전일 고저점 이탈 후 복귀(SMC) 패턴 |
 
-### 🔧 분석 도구 기능
+### 🔧 분석 및 최적화 도구 기능
 
 *   **백테스팅 엔진**: 수수료, 슬리피지, 공매도 등을 고려한 정밀 시뮬레이션
 *   **성과 지표**: Sharpe Ratio, Sortino Ratio, MDD, 승률, Profit Factor 등 10+ 지표 자동 계산
 *   **시각화**: 자산 곡선(Equity Curve), 수익률 분포, 리스크-리턴 산점도, 승률 차트 등 제공
-*   **파라미터 최적화**: 그리드 서치(Grid Search)를 통한 최적 파라미터 탐색
+*   **Walk-Forward Optimizer**: 슬라이딩 윈도우 기반 전진 분석으로 과적합(Curve Fitting) 방지
+*   **Genetic Algorithm (DE)**: 차분 진화 알고리즘을 통한 비선형 파라미터 공간의 초고속 최적화
+*   **Monte Carlo Simulator**: 5,000회 이상의 경로 시뮬레이션으로 VaR/CVaR 리스크 측정
 
 ---
 

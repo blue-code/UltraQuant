@@ -224,6 +224,107 @@ class StrategySignals:
             return 0
         return signal_func
 
+    # --- 5. 최신/고급 전략 (ML & Structure) ---
+
+    @staticmethod
+    def ml_ensemble_signals(params: dict) -> Callable:
+        """
+        ML 앙상블 전략: RandomForest를 이용한 방향성 예측
+        학습 효율을 위해 20봉마다 재학습 수행
+        """
+        from sklearn.ensemble import RandomForestClassifier
+        lookback = int(params.get('lookback', 252))
+        retrain_freq = 20
+        model_cache = {'model': None, 'last_train_idx': -1}
+        
+        def signal_func(data, idx):
+            if idx < lookback + 50: return 0
+            
+            # 피처 생성
+            df = data.copy()
+            df['RSI'] = df['Close'].diff().rolling(14).apply(lambda x: np.sum(x[x>0]) / (np.sum(np.abs(x))+1e-9))
+            df['ROC'] = df['Close'].pct_change(10)
+            df['Vol'] = df['Close'].rolling(20).std()
+            df['Target'] = (df['Close'].shift(-1) > df['Close']).astype(int)
+            
+            features = ['RSI', 'ROC', 'Vol']
+            
+            # 주기적 재학습
+            if model_cache['model'] is None or (idx - model_cache['last_train_idx']) >= retrain_freq:
+                train_df = df.iloc[idx-lookback:idx].dropna()
+                if len(train_df) < 50: return 0
+                
+                model = RandomForestClassifier(n_estimators=10, max_depth=3, random_state=42) # 가볍게 설정
+                model.fit(train_df[features], train_df['Target'])
+                model_cache['model'] = model
+                model_cache['last_train_idx'] = idx
+            
+            current_feat = df.iloc[[idx]][features].fillna(0)
+            prob = model_cache['model'].predict_proba(current_feat)[0][1]
+            
+            if prob > 0.55: return 1
+            elif prob < 0.45: return -1
+            return 0
+        return signal_func
+
+    @staticmethod
+    def regime_switching_signals(params: dict) -> Callable:
+        """
+        시장 국면 전환 전략: 변동성 국면에 따라 추세추종/평균회귀 자동 스위칭
+        """
+        vol_lookback = int(params.get('vol_lookback', 20))
+        threshold = float(params.get('threshold', 1.5))
+        
+        def signal_func(data, idx):
+            if idx < vol_lookback + 50: return 0
+            
+            returns = data['Close'].pct_change()
+            curr_vol = returns.iloc[-vol_lookback:].std()
+            avg_vol = returns.rolling(100).std().iloc[-1]
+            
+            # 1. 고변동성 국면 (추세 발생 가능성) -> 모멘텀
+            if curr_vol > avg_vol * threshold:
+                mom = data['Close'].iloc[-1] / data['Close'].iloc[-20] - 1
+                return 1 if mom > 0 else -1
+            
+            # 2. 저변동성 국면 (박스권) -> RSI 역추세
+            else:
+                prices = data['Close']
+                rsi = (prices.diff().rolling(14).apply(lambda x: np.sum(x[x>0]) / (np.sum(np.abs(x))+1e-9))).iloc[-1]
+                if rsi < 0.3: return 1
+                elif rsi > 0.7: return -1
+            return 0
+        return signal_func
+
+    @staticmethod
+    def liquidity_sweep_signals(params: dict) -> Callable:
+        """
+        유동성 스윕(Liquidity Sweep): 전일 고/저점 돌파 후 복귀 포착 (SMC)
+        """
+        lookback = int(params.get('lookback', 20))
+        
+        def signal_func(data, idx):
+            if idx < 2: return 0
+            
+            # 전일(또는 이전 구간) 고점/저점
+            prev_high = data['High'].iloc[-lookback-1:-1].max()
+            prev_low = data['Low'].iloc[-lookback-1:-1].min()
+            
+            curr_high = data['High'].iloc[-1]
+            curr_low = data['Low'].iloc[-1]
+            curr_close = data['Close'].iloc[-1]
+            
+            # 1. Bullish Sweep: 저점 이탈 후 위로 말아올릴 때
+            if data['Low'].iloc[-1] < prev_low and curr_close > prev_low:
+                return 1
+            
+            # 2. Bearish Sweep: 고점 돌파 후 아래로 꺾일 때
+            if data['High'].iloc[-1] > prev_high and curr_close < prev_high:
+                return -1
+                
+            return 0
+        return signal_func
+
 # ============================================ 
 # 4. 최적화 도구
 # ============================================ 
