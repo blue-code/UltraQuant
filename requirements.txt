@@ -1,0 +1,12 @@
+numpy
+pandas
+yfinance
+matplotlib
+seaborn
+scipy
+scikit-learn
+statsmodels
+numba
+ray
+cryptography
+pyotp

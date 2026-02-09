@@ -1,10 +1,3 @@
-이제 진짜 최종 완전체입니다. 속도, 보안, 글로벌 확장성까지 모두 담았습니다.
-
----
-
-## 🚀 UltraQuant
-
-```python
 # ============================================
 # ULTRA QUANT: 고성능 백테스팅 + 보안 + 멀티마켓
 # ============================================
@@ -82,7 +75,12 @@ class FastBacktester:
             
             # 신호 결합
             raw_signal = 0.6 * mom_short + 0.4 * mom_long
-            signals[i] = np.clip(raw_signal * vol_adj, -2.0, 2.0)
+            val = raw_signal * vol_adj
+            if val > 2.0:
+                val = 2.0
+            elif val < -2.0:
+                val = -2.0
+            signals[i] = val
         
         return signals
     
@@ -668,7 +666,7 @@ class UltraQuantSystem:
         
         # 데이터 로드
         df = self._load_data(symbol)
-        prices = df['Close'].values.astype(np.float64)
+        prices = df['Close'].values.flatten().astype(np.float64)
         
         # 벤치마크
         print("\n⏱️ 성능 측정:")
@@ -697,7 +695,10 @@ class UltraQuantSystem:
     def _load_data(self, symbol: str) -> pd.DataFrame:
         """데이터 로드"""
         import yfinance as yf
-        return yf.download(symbol, period='2y', progress=False)
+        df = yf.download(symbol, period='2y', progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df = df.droplevel(1, axis=1)  # Ticker 레벨 제거
+        return df
     
     def execute_multi_market_strategy(self, signals: Dict[str, float]):
         """멀티 마켓 전략 실행"""
@@ -777,145 +778,3 @@ if __name__ == "__main__":
     print("\n📌 설치 가이드:")
     print("  pip install numba ray cryptography pyotp")
     print("  pip install alpaca-trade-api ccxt")
-```
-
----
-
-## 📦 전체 설치 가이드
-
-```bash
-# ===== 기본 패키지 =====
-pip install numpy pandas yfinance scikit-learn matplotlib seaborn plotly
-
-# ===== 고성능 =====
-pip install numba          # JIT 컴파일 (100배 속도 향상)
-pip install ray            # 분산 처리
-
-# ===== 보안 =====
-pip install cryptography   # 암호화
-pip install pyotp          # 2FA
-
-# ===== 브로커 =====
-pip install alpaca-trade-api   # Alpaca (미국 주식)
-pip install ccxt                # 암호화폐 (100+ 거래소)
-pip install FinanceDataReader   # 한국 주식 데이터
-
-# ===== 대시보드 =====
-pip install streamlit
-
-# ===== 선택사항 =====
-pip install ibapi              # IBKR
-```
-
----
-
-## 🏎️ 성능 비교
-
-| 구현 | 1,000회 실행 시간 | 향상률 |
-|------|-------------------|--------|
-| Pure Python | ~120초 | 1x |
-| NumPy Vectorized | ~8초 | 15x |
-| **Numba JIT** | **~0.8초** | **150x** |
-| **Numba + Ray (4코어)** | **~0.25초** | **480x** |
-
----
-
-## 🔐 보안 아키텍처
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    보안 레이어                           │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  [사용자 입력]                                          │
-│       ↓                                                 │
-│  ┌─────────────┐                                       │
-│  │ 마스터 PW   │ ──→ PBKDF2 (480,000 iterations)       │
-│  └─────────────┘           ↓                           │
-│                       AES-256 Key                       │
-│                            ↓                            │
-│  ┌─────────────────────────────────────────┐           │
-│  │         Fernet 암호화 저장소             │           │
-│  │  • API Keys                             │           │
-│  │  • Secrets                              │           │
-│  │  • Config                               │           │
-│  └─────────────────────────────────────────┘           │
-│                            ↑                            │
-│                       복호화                            │
-│                            │                            │
-│  ┌─────────────┐     ┌─────────────┐                   │
-│  │  2FA TOTP   │ ──→ │   Access    │                   │
-│  └─────────────┘     └─────────────┘                   │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🌍 멀티 마켓 지원
-
-| 마켓 | 브로커/API | 기능 |
-|------|-----------|------|
-| 🇺🇸 미국 주식 | Alpaca, IBKR | 실시간 체결, 마진, 숏 |
-| 🇰🇷 한국 주식 | 키움증권 | 실시간 체결 |
-| ₿ 암호화폐 | CCXT (100+ 거래소) | Spot, Futures, Margin |
-| 💱 외환 | OANDA | 70+ 통화쌍 |
-| 📈 선물 | IBKR | 지수, 원자재 |
-
----
-
-## 🎯 사용 예시
-
-### 고성능 백테스팅
-
-```python
-backtester = FastBacktester(use_numba=True, use_ray=True)
-
-# 파라미터 스윕 (81개 조합)
-param_grid = {
-    'lookback': [30, 50, 100],
-    'sma_short': [10, 20, 30],
-    'sma_long': [50, 100, 200],
-    'target_vol': [0.10, 0.15, 0.20]
-}
-
-results = backtester.run_parameter_sweep(prices, param_grid)
-```
-
-### 보안 API 키 저장
-
-```python
-security = SecureConfigManager()
-security.setup_encryption()  # 마스터 PW 입력
-security.setup_2fa()         # Google Authenticator
-
-security.store_api_key('binance', 'api_key_xxx', 'secret_xxx')
-```
-
-### 멀티 마켓 트레이딩
-
-```python
-broker = UniversalBroker()
-broker.connect_us_stock(api_key, secret, paper=True)
-broker.connect_crypto('binance', api_key, secret)
-
-# 주문
-order = Order(
-    symbol='BTC/USDT',
-    side='buy',
-    quantity=0.01,
-    market_type=MarketType.CRYPTO
-)
-broker.place_order(order)
-```
-
----
-
-이제 **진짜 끝**입니다! 🎉
-
-**ULTRA EDITION** 기능 요약:
-- ⚡ Numba + Ray로 100~500배 속도 향상
-- 🔐 AES-256 암호화 + 2FA 보안
-- 🌍 주식, 암호화폐, 외환 통합 지원
-
-추가로 필요한 거 있으신가요? 😄
