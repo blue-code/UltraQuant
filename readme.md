@@ -169,6 +169,45 @@ broker.place_order(order)
 
 ---
 
+## 💡 UltraQuant 시너지 활용 가이드
+
+본 시스템은 전략 개발(`strategy.py`)과 실행 엔진(`ultra_quant.py`)이 분리되어 시너지를 내도록 설계되었습니다.
+
+### 🔄 통합 워크플로우: 연구에서 실전까지
+
+1.  **전략 선정 (`strategy.py`)**: 12종의 내장 전략 중 하나(예: ML Ensemble)를 선택하거나 자신만의 `signal_func`를 정의합니다.
+2.  **전략 최적화 (`strategy.py`)**: `WalkForwardOptimizer`를 사용하여 과거 데이터에서의 과적합을 방지하고, `DifferentialEvolutionOptimizer`로 최적의 파라미터 조합을 찾습니다.
+3.  **초고속 검증 (`ultra_quant.py`)**: 최적화된 파라미터를 `FastBacktester`에 넣어 Numba/Ray 가속을 통해 수만 번의 시뮬레이션을 순식간에 완료합니다.
+4.  **리스크 스트레스 테스트 (`ultra_quant.py`)**: `MonteCarloSimulator`를 통해 최악의 시장 상황(VaR, CVaR)에서도 계좌가 견딜 수 있는지 검증합니다.
+5.  **보안 접속 및 실행 (`ultra_quant.py`)**: `SecureConfigManager`로 API 키를 안전하게 로드하고, `UniversalBroker`를 통해 멀티 마켓에 주문을 전송합니다.
+
+### 🛠️ 결합 코드 예시
+
+```python
+from strategy import StrategySignals, WalkForwardOptimizer
+from ultra_quant import FastBacktester, MonteCarloSimulator, SecureConfigManager, UniversalBroker
+
+# 1. 전략 최적화 (Brain)
+wfo = WalkForwardOptimizer(data)
+best_params = wfo.run_wfa(StrategySignals.ml_ensemble_signals, param_grid)
+
+# 2. 고성능 검증 (Engine)
+fast_bt = FastBacktester(use_numba=True)
+results = fast_bt.run_single_backtest(data['Close'].values, best_params)
+
+# 3. 리스크 분석 (Shield)
+mc = MonteCarloSimulator()
+risk_stats = mc.analyze_risk(mc.run_simulation(results['daily_returns'], 100000))
+
+# 4. 실전 투입 (Execution)
+security = SecureConfigManager()
+security.setup_encryption() # 마스터 PW 인증
+broker = UniversalBroker()
+broker.connect_us_stock(*security.get_api_key('alpaca'))
+```
+
+---
+
 **ULTRA EDITION** 기능 요약:
 - ⚡ Numba + Ray로 100~500배 속도 향상
 - 🔐 AES-256 암호화 + 2FA 보안
