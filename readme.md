@@ -35,14 +35,14 @@ pip install ibapi              # IBKR
 
 ---
 
-## 🏎️ 성능 비교 (UltraQuant Core)
+## 🏎️ 성능 및 리스크 분석 (UltraQuant Core)
 
-| 구현 | 1,000회 실행 시간 | 향상률 |
-|------|-------------------|--------|
-| Pure Python | ~120초 | 1x |
-| NumPy Vectorized | ~8초 | 15x |
-| **Numba JIT** | **~0.8초** | **150x** |
-| **Numba + Ray (4코어)** | **~0.004초** | **2,500x+** |
+| 구현 | 설명 | 향상률/효과 |
+|------|------|------|
+| Pure Python | 일반 루프 기반 백테스팅 | 1x |
+| **Numba JIT** | JIT 컴파일 (루프 최적화) | 100x+ |
+| **Monte Carlo** | 5,000회 시뮬레이션으로 VaR/CVaR 측정 | 리스크 관리 강화 |
+| **Walk-Forward** | 전진 분석을 통한 파라미터 과적합 방지 | 실전 신뢰도 향상 |
 
 ---
 
