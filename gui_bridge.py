@@ -109,15 +109,16 @@ DEFAULT_SYMBOLS = (
 # 최근 적합도 반영 설정값
 RECENT_PERIODS = ("3mo", "6mo")
 BASE_WEIGHT = 0.4
-RECENT_WEIGHT = 0.6
+RECENT_WEIGHT = 0.5
+ROLLING_WEIGHT = 0.1
 RECENT_GATE_MIN_SCORE = 0.0
 RECENT_GATE_MIN_TRADES = 1
-FINAL_BASE_RECENT_WEIGHT = 0.75
-FINAL_ROLLING_WEIGHT = 0.25
-ROLLING_WINDOW_DAYS = 252
-ROLLING_STEP_DAYS = 63
-ROLLING_GATE_MIN_WINDOWS = 3
-ROLLING_GATE_MIN_WIN_RATIO = 0.5
+ROLLING_CONFIGS = (
+    {"name": "1Y", "window_days": 252, "step_days": 63, "weight": 0.4},
+    {"name": "6M", "window_days": 126, "step_days": 21, "weight": 0.6},
+)
+ROLLING_GATE_MIN_WINDOWS = 4
+ROLLING_GATE_MIN_WIN_RATIO = 0.55
 
 
 def load_symbol_choices(file_path: str = "symbols.json") -> tuple[str, ...]:
@@ -191,7 +192,7 @@ class StrategyBridgeApp:
         self.use_rolling_var = tk.BooleanVar(value=True)
         rolling_check = ttk.Checkbutton(
             top,
-            text="Rolling 검증(1년 창/3개월 스텝)",
+            text="Rolling 검증(1년+6개월 멀티 창)",
             variable=self.use_rolling_var,
         )
         rolling_check.grid(row=1, column=0, columnspan=6, sticky=tk.W, padx=4, pady=4)
@@ -286,36 +287,54 @@ class StrategyBridgeApp:
 
     @staticmethod
     def _blended_score(base_score: float, recent_score: float) -> float:
+        weights = [BASE_WEIGHT]
+        values = [base_score]
         if np.isfinite(recent_score):
-            return (BASE_WEIGHT * base_score) + (RECENT_WEIGHT * recent_score)
-        return base_score
+            weights.append(RECENT_WEIGHT)
+            values.append(recent_score)
+        return float(np.average(values, weights=weights))
 
     @staticmethod
-    def _final_score(blended_score: float, rolling_score: float, use_rolling: bool) -> float:
+    def _final_score(base_score: float, recent_score: float, rolling_score: float, use_rolling: bool) -> float:
+        weights = [BASE_WEIGHT]
+        values = [base_score]
+        if np.isfinite(recent_score):
+            weights.append(RECENT_WEIGHT)
+            values.append(recent_score)
         if use_rolling and np.isfinite(rolling_score):
-            return (FINAL_BASE_RECENT_WEIGHT * blended_score) + (FINAL_ROLLING_WEIGHT * rolling_score)
-        return blended_score
+            weights.append(ROLLING_WEIGHT)
+            values.append(rolling_score)
+        return float(np.average(values, weights=weights))
 
-    def _rolling_window_stats(self, df: pd.DataFrame, signal_factory, params: dict, strategy_name: str) -> dict:
-        if len(df) < ROLLING_WINDOW_DAYS:
+    def _rolling_window_stats_single(
+        self,
+        df: pd.DataFrame,
+        signal_factory,
+        params: dict,
+        strategy_name: str,
+        config_name: str,
+        window_days: int,
+        step_days: int,
+    ) -> dict:
+        if len(df) < window_days:
             return {
-                "rolling_score": float("-inf"),
-                "rolling_ok": False,
-                "rolling_note": "window 부족",
-                "rolling_windows": 0,
-                "rolling_win_ratio": 0.0,
-                "rolling_sharpe_median": 0.0,
-                "rolling_mdd_worst": 0.0,
-                "rolling_score_std": 0.0,
+                "ok": False,
+                "note": f"{config_name} window 부족",
+                "windows": 0,
+                "win_ratio": 0.0,
+                "score": float("-inf"),
+                "sharpe_median": 0.0,
+                "mdd_worst": 0.0,
+                "score_std": 0.0,
             }
 
         backtester = StrategyBacktester()
         rows = []
-        for start in range(0, len(df) - ROLLING_WINDOW_DAYS + 1, ROLLING_STEP_DAYS):
-            chunk = df.iloc[start : start + ROLLING_WINDOW_DAYS]
+        for start in range(0, len(df) - window_days + 1, step_days):
+            chunk = df.iloc[start : start + window_days]
             try:
                 signal_func = signal_factory(params)
-                result = backtester.run_backtest(chunk, signal_func, strategy_name=f"{strategy_name}_roll")
+                result = backtester.run_backtest(chunk, signal_func, strategy_name=f"{strategy_name}_roll_{config_name}")
                 m = result.metrics
                 sharpe = float(m.get("Sharpe Ratio", 0.0))
                 ret = float(m.get("Total Return", 0.0))
@@ -331,14 +350,14 @@ class StrategyBridgeApp:
 
         if not rows:
             return {
-                "rolling_score": float("-inf"),
-                "rolling_ok": False,
-                "rolling_note": "rolling 계산 실패",
-                "rolling_windows": 0,
-                "rolling_win_ratio": 0.0,
-                "rolling_sharpe_median": 0.0,
-                "rolling_mdd_worst": 0.0,
-                "rolling_score_std": 0.0,
+                "ok": False,
+                "note": f"{config_name} rolling 계산 실패",
+                "windows": 0,
+                "win_ratio": 0.0,
+                "score": float("-inf"),
+                "sharpe_median": 0.0,
+                "mdd_worst": 0.0,
+                "score_std": 0.0,
             }
 
         wins = sum(1 for r in rows if r["ret"] > 0.0)
@@ -349,22 +368,78 @@ class StrategyBridgeApp:
 
         # 일관성 점수: 승률/중앙 Sharpe 보상, 최악 MDD/변동성 페널티
         rolling_score = (3.0 * win_ratio) + (0.4 * sharpe_median) - (0.12 * abs(mdd_worst) * 100.0) - (0.1 * score_std)
-        rolling_ok = (len(rows) >= ROLLING_GATE_MIN_WINDOWS) and (win_ratio >= ROLLING_GATE_MIN_WIN_RATIO)
+
+        return {
+            "ok": True,
+            "note": "OK",
+            "windows": len(rows),
+            "win_ratio": win_ratio,
+            "score": rolling_score,
+            "sharpe_median": sharpe_median,
+            "mdd_worst": mdd_worst,
+            "score_std": score_std,
+        }
+
+    def _rolling_window_stats(self, df: pd.DataFrame, signal_factory, params: dict, strategy_name: str) -> dict:
+        by_config = {}
+        weighted_scores = []
+        weighted_win_ratio = []
+        total_windows = 0
+        notes = []
+        last_mdd_worst = 0.0
+
+        for cfg in ROLLING_CONFIGS:
+            single = self._rolling_window_stats_single(
+                df=df,
+                signal_factory=signal_factory,
+                params=params,
+                strategy_name=strategy_name,
+                config_name=cfg["name"],
+                window_days=cfg["window_days"],
+                step_days=cfg["step_days"],
+            )
+            by_config[cfg["name"]] = single
+            notes.append(f"{cfg['name']}:{single['note']}")
+            total_windows += int(single["windows"])
+            last_mdd_worst = min(last_mdd_worst, float(single["mdd_worst"]))
+            if single["ok"] and np.isfinite(single["score"]):
+                weighted_scores.append((cfg["weight"], single["score"]))
+                weighted_win_ratio.append((cfg["weight"], single["win_ratio"]))
+
+        if not weighted_scores:
+            return {
+                "rolling_score": float("-inf"),
+                "rolling_ok": False,
+                "rolling_note": " / ".join(notes),
+                "rolling_windows": total_windows,
+                "rolling_win_ratio": 0.0,
+                "rolling_mdd_worst": last_mdd_worst,
+                "rolling_detail": by_config,
+            }
+
+        score_weights = np.array([w for w, _ in weighted_scores], dtype=float)
+        score_values = np.array([v for _, v in weighted_scores], dtype=float)
+        agg_score = float(np.average(score_values, weights=score_weights))
+
+        win_weights = np.array([w for w, _ in weighted_win_ratio], dtype=float)
+        win_values = np.array([v for _, v in weighted_win_ratio], dtype=float)
+        agg_win_ratio = float(np.average(win_values, weights=win_weights))
+
+        rolling_ok = (total_windows >= ROLLING_GATE_MIN_WINDOWS) and (agg_win_ratio >= ROLLING_GATE_MIN_WIN_RATIO)
         rolling_note = (
             "PASS"
             if rolling_ok
-            else f"FAIL(windows<{ROLLING_GATE_MIN_WINDOWS} 또는 win_ratio<{ROLLING_GATE_MIN_WIN_RATIO:.2f})"
+            else f"FAIL(total_windows<{ROLLING_GATE_MIN_WINDOWS} 또는 win_ratio<{ROLLING_GATE_MIN_WIN_RATIO:.2f})"
         )
 
         return {
-            "rolling_score": rolling_score,
+            "rolling_score": agg_score,
             "rolling_ok": rolling_ok,
-            "rolling_note": rolling_note,
-            "rolling_windows": len(rows),
-            "rolling_win_ratio": win_ratio,
-            "rolling_sharpe_median": sharpe_median,
-            "rolling_mdd_worst": mdd_worst,
-            "rolling_score_std": score_std,
+            "rolling_note": f"{rolling_note} | {' / '.join(notes)}",
+            "rolling_windows": total_windows,
+            "rolling_win_ratio": agg_win_ratio,
+            "rolling_mdd_worst": last_mdd_worst,
+            "rolling_detail": by_config,
         }
 
     def _parse_params(self):
@@ -534,7 +609,9 @@ class StrategyBridgeApp:
                     row["rolling_note"] = roll.get("rolling_note", "SKIP")
                     row["rolling_windows"] = roll.get("rolling_windows", 0)
                     row["rolling_win_ratio"] = roll.get("rolling_win_ratio", 0.0)
-                    row["final_score"] = self._final_score(row["blend_score"], row["rolling_score"], use_rolling)
+                    row["final_score"] = self._final_score(
+                        row["score"], row["recent_score"], row["rolling_score"], use_rolling
+                    )
                     row["overall_ok"] = bool(row["recent_ok"]) and bool(row["rolling_ok"])
 
                 passed_rows = [r for r in ok_rows if r.get("overall_ok")]
@@ -553,7 +630,7 @@ class StrategyBridgeApp:
                     f"[전체 전략×기간 테스트 완료] {symbol} | periods={','.join(periods)}",
                     (
                         "최종 점수 기준 상위 결과 "
-                        f"(기본 {int(BASE_WEIGHT*100)}% + 최근 {int(RECENT_WEIGHT*100)}%, "
+                        f"(기본 {int(BASE_WEIGHT*100)}% + 최근 {int(RECENT_WEIGHT*100)}% + Rolling {int(ROLLING_WEIGHT*100)}%, "
                         f"최근 게이트 score>={RECENT_GATE_MIN_SCORE:.2f}, trades>={RECENT_GATE_MIN_TRADES}, "
                         f"Rolling={'ON' if use_rolling else 'OFF'})"
                     ),
@@ -687,7 +764,9 @@ class StrategyBridgeApp:
                         row["rolling_score"] = roll.get("rolling_score", float("-inf"))
                         row["rolling_ok"] = roll.get("rolling_ok", not use_rolling)
                         row["rolling_note"] = roll.get("rolling_note", "SKIP")
-                        row["final_score"] = self._final_score(row["blend_score"], row["rolling_score"], use_rolling)
+                        row["final_score"] = self._final_score(
+                            row["score"], row["recent_score"], row["rolling_score"], use_rolling
+                        )
                         row["overall_ok"] = bool(row["recent_ok"]) and bool(row["rolling_ok"])
                         rows.append(row)
                     except Exception as strategy_exc:
@@ -717,7 +796,7 @@ class StrategyBridgeApp:
                     f"[전체 전략 테스트 완료] {symbol} | {period}",
                     (
                         "최종 점수 기준 상위 결과 "
-                        f"(기본 {int(BASE_WEIGHT*100)}% + 최근 {int(RECENT_WEIGHT*100)}%, "
+                        f"(기본 {int(BASE_WEIGHT*100)}% + 최근 {int(RECENT_WEIGHT*100)}% + Rolling {int(ROLLING_WEIGHT*100)}%, "
                         f"최근 게이트 score>={RECENT_GATE_MIN_SCORE:.2f}, trades>={RECENT_GATE_MIN_TRADES}, "
                         f"Rolling={'ON' if use_rolling else 'OFF'})"
                     ),

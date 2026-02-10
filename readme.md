@@ -293,7 +293,7 @@ python gui_bridge.py
 1. 심볼 선택
 2. 기간 선택 (`1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `max`)
 3. 전략 선택
-4. 필요 시 JSON 파라미터 수정 + `Rolling 검증(1년 창/3개월 스텝)` 체크 여부 선택
+4. 필요 시 JSON 파라미터 수정 + `Rolling 검증(1년+6개월 멀티 창)` 체크 여부 선택
 5. 아래 중 하나 실행
    - `1) strategy.py로 테스트`: 선택한 전략만 실행
    - `1-A) 전체 전략 일괄 테스트`: 등록된 모든 전략 실행 후 최종 점수(최근+Rolling 반영) 순 정렬
@@ -505,12 +505,17 @@ GUI의 전체 전략 정렬은 Sharpe 단일 지표가 아니라 아래 3단계 
    - `Base = 0.6*Sharpe + 0.4*ReturnEffect - 0.3*MDDPenalty`
 2. 최근 가중점수(Recent Blend)
    - 최근 `3mo`, `6mo` 평균 점수를 사용
-   - `Blend = 0.4*Base + 0.6*Recent`
+   - `Blend = 0.4*Base + 0.5*Recent`
    - 최근 게이트: `recent_score >= 0`, `recent_trades >= 1`
 3. Rolling 일관성 보정(Final)
-   - 옵션: `Rolling 검증(1년 창/3개월 스텝)` 체크박스 (기본 ON)
-   - Rolling 게이트: 최소 윈도우 수/승률 기준 충족 시 통과
-   - `Final = 0.75*Blend + 0.25*RollingScore` (Rolling ON일 때)
+   - 옵션: `Rolling 검증(1년+6개월 멀티 창)` 체크박스 (기본 ON)
+   - Rolling 구성:
+     - `1Y`: 252일 창 / 63일 스텝
+     - `6M`: 126일 창 / 21일 스텝
+   - Rolling 게이트:
+     - 최소 전체 윈도우 수 `>= 4`
+     - 가중 평균 `win_ratio >= 0.55`
+   - `Final = 0.4*Base + 0.5*Recent + 0.1*RollingScore` (Rolling ON일 때)
 
 ### 기간 선택
 GUI 기간 콤보박스는 현재 아래 값을 지원합니다.
