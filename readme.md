@@ -213,3 +213,57 @@ broker.connect_us_stock(*security.get_api_key('alpaca'))
 - 🔐 AES-256 암호화 + 2FA 보안
 - 🌍 주식, 암호화폐, 외환 통합 지원
 - 🧪 12+ 퀀트 전략 및 정밀 분석 도구 포함
+---
+
+## 🚀 실행 가이드 (최신)
+
+### 1) 가장 쉬운 실행: `run.bat` 하나로 시작
+
+Windows에서는 아래처럼 실행하면 `venv` 생성/활성화, 의존성 설치 후 실행 모드를 선택할 수 있습니다.
+
+```bat
+run.bat
+```
+
+실행 중 메뉴:
+
+- `1`: 콘솔 모드 (`ultra_quant.py`)
+- `2`: GUI 모드 (`gui_bridge.py`)
+- 엔터: 기본값 `1`
+
+### 2) GUI로 전략 테스트 후 즉시 적용
+
+GUI 모드(`2`)를 선택하면 `strategy.py`와 `ultra_quant.py`를 연결한 브리지 화면이 열립니다.
+
+작업 순서:
+
+1. 심볼 입력 (예: `SPY`, `AAPL`)
+2. 기간 선택 (예: `1y`, `2y`)
+3. 전략 선택 (`Turtle`, `RSI2`, `Momentum`, `ML Ensemble`, `Regime Switching`, `Liquidity Sweep`)
+4. 전략 파라미터(JSON) 수정
+5. `1) strategy.py로 테스트` 클릭
+6. 결과 확인 후 `2) ultra_quant.py에 즉시 적용` 클릭
+
+결과 창에 수익률/샤프비율/MDD/트레이드 수와 함께, `FastBacktester`에 적용된 매핑 파라미터가 출력됩니다.
+
+### 3) 수동 실행 (선택)
+
+```bat
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+python ultra_quant.py
+python gui_bridge.py
+```
+
+### 4) 테스트 실행
+
+```bat
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+### 5) 자주 발생하는 문제
+
+- `ModuleNotFoundError`: 가상환경 활성화 여부 확인 후 `pip install -r requirements.txt` 재실행
+- GUI가 안 뜸: `python gui_bridge.py`를 직접 실행해 오류 메시지 확인
+- 한글 깨짐: PowerShell에서 `chcp 65001` 실행 후 다시 확인
