@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional, Callable
+from typing import Dict, List, Tuple, Optional, Callable, Any
 from dataclasses import dataclass, field
 from itertools import product
 from enum import Enum
@@ -42,6 +42,7 @@ class BacktestResult:
     daily_returns: pd.Series
     metrics: Dict
     trades: List = field(default_factory=list)
+    report: Optional[pd.DataFrame] = None
     
     def __repr__(self):
         return (
@@ -94,6 +95,75 @@ class PerformanceMetrics:
             'Profit Factor': profit_factor
         }
 
+    @staticmethod
+    def risk_analysis(returns: pd.Series, annualization: int = 252) -> Dict[str, float]:
+        """Qlib 스타일에 맞춘 리스크 요약 지표."""
+        r = returns.dropna()
+        if len(r) == 0:
+            return {}
+
+        mean = float(r.mean())
+        std = float(r.std(ddof=1)) if len(r) > 1 else 0.0
+        annualized_return = mean * annualization
+        information_ratio = (mean / (std + 1e-12)) * np.sqrt(annualization)
+        max_drawdown = float((r.cumsum() - r.cumsum().cummax()).min())
+        return {
+            "mean": mean,
+            "std": std,
+            "annualized_return": annualized_return,
+            "information_ratio": information_ratio,
+            "max_drawdown": max_drawdown,
+        }
+
+
+@dataclass
+class TransactionCostModel:
+    """체결/비용 모델(qlib exchange 파라미터 축약형)."""
+    open_cost: float = 0.001
+    close_cost: float = 0.001
+    min_cost: float = 0.0
+    impact_cost: float = 0.0
+    slippage: float = 0.0005
+    trade_unit: Optional[int] = None
+    volume_limit_ratio: Optional[float] = None  # 0~1, daily volume 대비 체결 상한
+
+
+class DataHealthCheckerLite:
+    """백테스트 전 OHLCV 무결성 점검."""
+    REQUIRED_COLUMNS = ("Open", "High", "Low", "Close")
+
+    @staticmethod
+    def check(data: pd.DataFrame, large_step_threshold_price: float = 0.5) -> Dict[str, Any]:
+        issues: Dict[str, Any] = {}
+
+        missing_cols = [c for c in DataHealthCheckerLite.REQUIRED_COLUMNS if c not in data.columns]
+        if missing_cols:
+            issues["missing_columns"] = missing_cols
+
+        if not data.index.is_monotonic_increasing:
+            issues["index_not_monotonic"] = True
+        if data.index.has_duplicates:
+            issues["duplicate_index"] = int(data.index.duplicated().sum())
+
+        null_counts = data[list(set(data.columns) & set(DataHealthCheckerLite.REQUIRED_COLUMNS))].isnull().sum()
+        null_counts = {k: int(v) for k, v in null_counts.items() if v > 0}
+        if null_counts:
+            issues["missing_data"] = null_counts
+
+        if "Close" in data.columns:
+            pct = data["Close"].pct_change(fill_method=None).abs()
+            max_step = float(pct.max()) if len(pct.dropna()) else 0.0
+            if max_step > large_step_threshold_price:
+                issues["large_step_close"] = max_step
+
+        return issues
+
+    @staticmethod
+    def validate_or_raise(data: pd.DataFrame) -> None:
+        issues = DataHealthCheckerLite.check(data)
+        if issues:
+            raise ValueError(f"데이터 헬스체크 실패: {issues}")
+
 # ============================================ 
 # 2. 諛깊뀒?ㅽ똿 ?붿쭊
 # ============================================ 
@@ -101,73 +171,152 @@ class PerformanceMetrics:
 class StrategyBacktester:
     """?대깽??湲곕컲 諛깊뀒?ㅽ똿 ?붿쭊"""
     
-    def __init__(self, initial_capital: float = 100000, commission: float = 0.001, 
-                 slippage: float = 0.0005, position_size: float = 0.95):
+    def __init__(self, initial_capital: float = 100000, commission: float = 0.001,
+                 slippage: float = 0.0005, position_size: float = 0.95,
+                 open_cost: Optional[float] = None, close_cost: Optional[float] = None,
+                 min_cost: float = 0.0, impact_cost: float = 0.0,
+                 trade_unit: Optional[int] = None, volume_limit_ratio: Optional[float] = None,
+                 run_health_check: bool = True):
         self.initial_capital = initial_capital
         self.commission = commission
         self.slippage = slippage
         self.position_size = position_size
+        self.run_health_check = run_health_check
+        self.cost_model = TransactionCostModel(
+            open_cost=commission if open_cost is None else open_cost,
+            close_cost=commission if close_cost is None else close_cost,
+            min_cost=min_cost,
+            impact_cost=impact_cost,
+            slippage=slippage,
+            trade_unit=trade_unit,
+            volume_limit_ratio=volume_limit_ratio,
+        )
+
+    def _trade_cost(self, notional: float, is_open: bool, signal_strength: float = 1.0) -> float:
+        base = self.cost_model.open_cost if is_open else self.cost_model.close_cost
+        impact = self.cost_model.impact_cost * max(0.0, signal_strength)
+        total_rate = base + impact
+        return max(notional * total_rate, self.cost_model.min_cost)
+
+    def _cap_trade_notional(self, equity: float, row: pd.Series) -> float:
+        target = equity * self.position_size
+        if self.cost_model.volume_limit_ratio is None or "Volume" not in row.index:
+            return target
+        if row["Volume"] is None or np.isnan(row["Volume"]) or row["Volume"] <= 0:
+            return target
+        vol_cap = float(row["Volume"]) * float(row["Close"]) * self.cost_model.volume_limit_ratio
+        return min(target, vol_cap)
     
-    def run_backtest(self, data: pd.DataFrame, signal_func: Callable, 
-                     strategy_name: str = "Strategy") -> BacktestResult:
-        equity = [self.initial_capital]
-        returns = []
-        trades = []
-        position = 0
-        entry_price = 0
-        
+    def run_backtest(self, data: pd.DataFrame, signal_func: Callable,
+                     strategy_name: str = "Strategy",
+                     benchmark_returns: Optional[pd.Series] = None) -> BacktestResult:
+        if self.run_health_check:
+            DataHealthCheckerLite.validate_or_raise(data)
+
         prices = data['Close'].values
         dates = data.index
-        lookback = 50 
-        
+        lookback = 50
+
+        equity = self.initial_capital
+        position = 0
+        equity_curve: List[float] = []
+        returns: List[float] = []
+        costs: List[float] = []
+        turnovers: List[float] = []
+        trades: List[Dict[str, Any]] = []
+
+        if benchmark_returns is None:
+            bench = pd.Series(prices, index=dates).pct_change().fillna(0.0)
+        else:
+            bench = benchmark_returns.reindex(dates).fillna(0.0)
+
         for i in range(lookback, len(data)):
-            signal = signal_func(data.iloc[:i+1], i)
+            prev_equity = equity
+            signal = float(signal_func(data.iloc[:i+1], i))
             current_price = prices[i]
             prev_price = prices[i-1]
-            
-            if position == 0:
-                if signal > 0.3:
-                    position = 1
-                    entry_price = current_price * (1 + self.slippage)
-                    trade_value = equity[-1] * self.position_size
-                    shares = trade_value / entry_price
-                    trades.append({'date': dates[i], 'type': 'BUY', 'price': entry_price, 'shares': shares})
-                elif signal < -0.3:
-                    position = -1
-                    entry_price = current_price * (1 - self.slippage)
-                    trades.append({'date': dates[i], 'type': 'SELL SHORT', 'price': entry_price})
-            
-            elif position == 1:
-                if signal < -0.1:
-                    exit_price = current_price * (1 - self.slippage)
-                    pnl = (exit_price - entry_price) / entry_price
-                    equity.append(equity[-1] * (1 + pnl) * (1 - self.commission))
-                    trades.append({'date': dates[i], 'type': 'SELL', 'price': exit_price, 'pnl': pnl})
-                    position = 0
-            
-            elif position == -1:
-                if signal > 0.1:
-                    exit_price = current_price * (1 + self.slippage)
-                    pnl = (entry_price - exit_price) / entry_price
-                    equity.append(equity[-1] * (1 + pnl) * (1 - self.commission))
-                    trades.append({'date': dates[i], 'type': 'COVER', 'price': exit_price, 'pnl': pnl})
-                    position = 0
-            
-            daily_return = 0
-            if position == 1: daily_return = (current_price - prev_price) / prev_price
-            elif position == -1: daily_return = (prev_price - current_price) / prev_price
-            returns.append(daily_return)
-            
-            if len(equity) < len(returns) + 1:
-                if position != 0: equity.append(equity[-1] * (1 + daily_return))
-                else: equity.append(equity[-1])
+            day_ret = 0.0
 
-        equity_series = pd.Series(equity[:len(returns)], index=dates[lookback:])
-        returns_series = pd.Series(returns, index=dates[lookback:])
+            if position != 0:
+                day_ret = position * ((current_price - prev_price) / (prev_price + 1e-12))
+                equity *= (1 + day_ret)
+
+            trade_cost = 0.0
+            trade_turnover = 0.0
+
+            # 진입
+            if position == 0 and signal > 0.3:
+                notional = self._cap_trade_notional(equity, data.iloc[i])
+                trade_cost = self._trade_cost(notional, is_open=True, signal_strength=abs(signal))
+                equity -= trade_cost
+                trade_turnover = notional / (prev_equity + 1e-12)
+                position = 1
+                trades.append({'date': dates[i], 'type': 'BUY', 'price': current_price, 'cost': trade_cost})
+            elif position == 0 and signal < -0.3:
+                notional = self._cap_trade_notional(equity, data.iloc[i])
+                trade_cost = self._trade_cost(notional, is_open=True, signal_strength=abs(signal))
+                equity -= trade_cost
+                trade_turnover = notional / (prev_equity + 1e-12)
+                position = -1
+                trades.append({'date': dates[i], 'type': 'SELL SHORT', 'price': current_price, 'cost': trade_cost})
+            # 청산
+            elif position == 1 and signal < -0.1:
+                notional = self._cap_trade_notional(equity, data.iloc[i])
+                trade_cost = self._trade_cost(notional, is_open=False, signal_strength=abs(signal))
+                equity -= trade_cost
+                trade_turnover = notional / (prev_equity + 1e-12)
+                position = 0
+                trades.append({'date': dates[i], 'type': 'SELL', 'price': current_price, 'cost': trade_cost})
+            elif position == -1 and signal > 0.1:
+                notional = self._cap_trade_notional(equity, data.iloc[i])
+                trade_cost = self._trade_cost(notional, is_open=False, signal_strength=abs(signal))
+                equity -= trade_cost
+                trade_turnover = notional / (prev_equity + 1e-12)
+                position = 0
+                trades.append({'date': dates[i], 'type': 'COVER', 'price': current_price, 'cost': trade_cost})
+
+            net_ret = (equity / (prev_equity + 1e-12)) - 1.0
+            equity_curve.append(equity)
+            returns.append(net_ret)
+            costs.append(trade_cost / (prev_equity + 1e-12))
+            turnovers.append(trade_turnover)
+
+        idx = dates[lookback:]
+        equity_series = pd.Series(equity_curve, index=idx)
+        returns_series = pd.Series(returns, index=idx)
+        costs_series = pd.Series(costs, index=idx)
+        turnover_series = pd.Series(turnovers, index=idx)
+        bench_series = bench.reindex(idx).fillna(0.0)
+
         metrics = PerformanceMetrics.calculate_all(returns_series, equity_series)
-        
-        return BacktestResult(strategy_name=strategy_name, equity_curve=equity_series, 
-                              daily_returns=returns_series, metrics=metrics, trades=trades)
+        excess_wo_cost = returns_series - bench_series
+        excess_w_cost = returns_series - bench_series - costs_series
+        metrics["Excess Return (wo Cost)"] = float(excess_wo_cost.sum())
+        metrics["Excess Return (w Cost)"] = float(excess_w_cost.sum())
+        metrics["Turnover Mean"] = float(turnover_series.mean())
+        metrics["Risk (Excess wo Cost)"] = PerformanceMetrics.risk_analysis(excess_wo_cost)
+        metrics["Risk (Excess w Cost)"] = PerformanceMetrics.risk_analysis(excess_w_cost)
+
+        report = pd.DataFrame(
+            {
+                "return": returns_series,
+                "cost": costs_series,
+                "bench": bench_series,
+                "turnover": turnover_series,
+                "excess_return_wo_cost": excess_wo_cost,
+                "excess_return_w_cost": excess_w_cost,
+            },
+            index=idx,
+        )
+
+        return BacktestResult(
+            strategy_name=strategy_name,
+            equity_curve=equity_series,
+            daily_returns=returns_series,
+            metrics=metrics,
+            trades=trades,
+            report=report,
+        )
 
 # ============================================ 
 # 3. ?꾨왂 援ы쁽
@@ -789,6 +938,100 @@ class WalkForwardOptimizer:
             results.append({'window': i, 'best_params': best_params, 
                             'oos_sharpe': test_res.metrics['Sharpe Ratio']})
         return results
+
+
+class RollingOOSRunner:
+    """
+    롤링 OOS 자동화 실행기.
+    - train/test를 step 단위로 이동
+    - 각 윈도우에서 train 최적화 후 test OOS 평가
+    - 윈도우별 리포트와 통합 리포트 반환
+    """
+
+    def __init__(self, data: pd.DataFrame, initial_capital: float = 100000):
+        self.data = data
+        self.initial_capital = initial_capital
+
+    def run(
+        self,
+        signal_factory: Callable,
+        param_grid: dict,
+        train_size: int = 252 * 2,
+        test_size: int = 63,
+        step_size: int = 21,
+        trunc_days: int = 1,
+    ) -> Dict[str, Any]:
+        total_len = len(self.data)
+        if total_len < (train_size + test_size + 10):
+            raise ValueError("롤링 실행을 위한 데이터 길이가 부족합니다.")
+
+        windows: List[Dict[str, Any]] = []
+        combined_reports: List[pd.DataFrame] = []
+        combined_returns: List[pd.Series] = []
+
+        start = 0
+        window_id = 0
+        while start + train_size + test_size <= total_len:
+            train_end = start + train_size
+            test_end = train_end + test_size
+
+            train_data = self.data.iloc[start:max(start, train_end - trunc_days)]
+            test_data = self.data.iloc[train_end:test_end]
+            if len(train_data) < 60 or len(test_data) < 30:
+                break
+
+            optimizer = StrategyOptimizer(train_data, initial_capital=self.initial_capital)
+            opt_df = optimizer.grid_search(signal_factory, param_grid)
+            if opt_df.empty:
+                start += step_size
+                window_id += 1
+                continue
+
+            best_params = opt_df.iloc[0].drop(['sharpe', 'return', 'mdd']).to_dict()
+            signal_func = signal_factory(best_params)
+
+            tester = StrategyBacktester(initial_capital=self.initial_capital)
+            oos_result = tester.run_backtest(test_data, signal_func, strategy_name=f"rolling_oos_{window_id}")
+
+            window_info = {
+                "window": window_id,
+                "train_start": str(train_data.index.min()),
+                "train_end": str(train_data.index.max()),
+                "test_start": str(test_data.index.min()),
+                "test_end": str(test_data.index.max()),
+                "best_params": best_params,
+                "oos_sharpe": float(oos_result.metrics.get("Sharpe Ratio", 0.0)),
+                "oos_return": float(oos_result.metrics.get("Total Return", 0.0)),
+                "oos_mdd": float(oos_result.metrics.get("Max Drawdown", 0.0)),
+            }
+            windows.append(window_info)
+
+            if oos_result.report is not None:
+                combined_reports.append(oos_result.report)
+            combined_returns.append(oos_result.daily_returns)
+
+            start += step_size
+            window_id += 1
+
+        if not windows:
+            raise RuntimeError("롤링 OOS 실행 실패: 유효한 윈도우가 없습니다.")
+
+        windows_df = pd.DataFrame(windows)
+        reports_df = pd.concat(combined_reports).sort_index() if combined_reports else pd.DataFrame()
+        returns_all = pd.concat(combined_returns).sort_index()
+        aggregate_risk = PerformanceMetrics.risk_analysis(returns_all)
+
+        return {
+            "windows": windows_df,
+            "report": reports_df,
+            "aggregate": {
+                "num_windows": int(len(windows_df)),
+                "mean_oos_sharpe": float(windows_df["oos_sharpe"].mean()),
+                "median_oos_sharpe": float(windows_df["oos_sharpe"].median()),
+                "mean_oos_return": float(windows_df["oos_return"].mean()),
+                "risk": aggregate_risk,
+            },
+        }
 
 class DifferentialEvolutionOptimizer:
     def __init__(self, data: pd.DataFrame, initial_capital: float = 100000):

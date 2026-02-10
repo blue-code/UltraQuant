@@ -25,7 +25,7 @@ try:
     NUMBA_AVAILABLE = True
 except ImportError:
     NUMBA_AVAILABLE = False
-    print("⚠️ Numba 미설치. pip install numba")
+    print("[WARN] Numba 미설치. pip install numba")
     
     # Dummy decorators/functions for fallback
     def jit(*args, **kwargs):
@@ -41,7 +41,7 @@ try:
     RAY_AVAILABLE = True
 except ImportError:
     RAY_AVAILABLE = False
-    print("⚠️ Ray 미설치. pip install ray")
+    print("[WARN] Ray 미설치. pip install ray")
 
 
 class FastBacktester:
@@ -266,14 +266,14 @@ try:
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
-    print("⚠️ cryptography 미설치. pip install cryptography")
+    print("[WARN] cryptography 미설치. pip install cryptography")
 
 try:
     import pyotp
     TOTP_AVAILABLE = True
 except ImportError:
     TOTP_AVAILABLE = False
-    print("⚠️ pyotp 미설치. pip install pyotp")
+    print("[WARN] pyotp 미설치. pip install pyotp")
 
 
 class SecureConfigManager:

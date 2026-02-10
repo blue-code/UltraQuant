@@ -379,3 +379,74 @@ bt = StrategyBacktester()
 result = bt.run_backtest(df, sig, strategy_name='adaptive_fractal_regime')
 print(result.metrics)
 ```
+
+---
+
+## 백테스트 엔진 보완 사항 (최신)
+
+### 1) 체결/비용 모델 고도화
+`StrategyBacktester`에 거래 비용 모델이 확장되었습니다.
+
+- 지원 항목:
+  - `open_cost`, `close_cost`
+  - `min_cost`
+  - `impact_cost`
+  - `trade_unit` (구조 확장)
+  - `volume_limit_ratio` (일별 거래량 기반 체결 상한)
+- 사용 예시:
+```python
+bt = StrategyBacktester(
+    open_cost=0.001,
+    close_cost=0.0015,
+    min_cost=1.0,
+    impact_cost=0.0002,
+    volume_limit_ratio=0.1,
+)
+```
+
+### 2) 벤치마크/초과수익 리포트 추가
+`run_backtest()` 결과에 `report` DataFrame이 포함됩니다.
+
+- 주요 컬럼:
+  - `return`, `cost`, `bench`, `turnover`
+  - `excess_return_wo_cost`, `excess_return_w_cost`
+- `metrics`에 아래 항목이 함께 추가됩니다.
+  - `Excess Return (wo Cost)`
+  - `Excess Return (w Cost)`
+  - `Risk (Excess wo Cost)`
+  - `Risk (Excess w Cost)`
+
+### 3) Rolling OOS 자동화
+`RollingOOSRunner`가 추가되어 롤링 학습/검증을 자동 실행할 수 있습니다.
+
+```python
+runner = RollingOOSRunner(df)
+out = runner.run(
+    signal_factory=StrategySignals.momentum_signals,
+    param_grid={'lookback': [40, 60], 'sma_filter': [120, 160]},
+    train_size=350,
+    test_size=80,
+    step_size=40,
+)
+```
+
+- 반환값:
+  - `windows`: 윈도우별 OOS 결과
+  - `report`: 통합 리포트
+  - `aggregate`: 평균 OOS 성능 및 리스크 요약
+
+### 4) 데이터 헬스체크 추가
+`DataHealthCheckerLite`를 통해 백테스트 전 데이터 무결성을 검사합니다.
+
+- 체크 항목:
+  - 필수 컬럼(OHLC) 누락
+  - 인덱스 정렬/중복
+  - 결측치
+  - 비정상 급등락(기본 임계치)
+- 기본 동작: `StrategyBacktester` 실행 시 자동 검증 (`run_health_check=True`)
+
+### Windows 인코딩 호환성
+`ultra_quant.py`의 경고 출력 문구를 ASCII 형태(`[WARN] ...`)로 정리했습니다.
+
+- 목적: CP949 콘솔 환경에서 import 시 발생하던 UnicodeEncodeError 방지
+- 기존 실행/사용법은 동일합니다.
