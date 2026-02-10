@@ -409,6 +409,171 @@ class StrategySignals:
             return 0
         return signal_func
 
+    @staticmethod
+    def supertrend_signals(params: dict) -> Callable:
+        atr_period = int(params.get('atr_period', 10))
+        multiplier = float(params.get('multiplier', 3.0))
+
+        def signal_func(data, idx):
+            if idx < atr_period + 20:
+                return 0
+
+            high = data['High']
+            low = data['Low']
+            close = data['Close']
+            hl2 = (high + low) / 2.0
+            atr = StrategySignals._atr(data, atr_period).bfill()
+
+            upper = hl2 + multiplier * atr
+            lower = hl2 - multiplier * atr
+
+            curr_close = close.iloc[-1]
+            prev_close = close.iloc[-2]
+            if curr_close > upper.iloc[-2] and prev_close <= upper.iloc[-3]:
+                return 1
+            if curr_close < lower.iloc[-2] and prev_close >= lower.iloc[-3]:
+                return -1
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def bollinger_reversion_signals(params: dict) -> Callable:
+        window = int(params.get('window', 20))
+        num_std = float(params.get('num_std', 2.0))
+        trend_period = int(params.get('trend_period', 120))
+
+        def signal_func(data, idx):
+            if idx < max(window + 5, trend_period + 5):
+                return 0
+
+            close = data['Close']
+            mid = close.rolling(window).mean()
+            std = close.rolling(window).std().replace(0, np.nan)
+            upper = mid + num_std * std
+            lower = mid - num_std * std
+            trend = close.rolling(trend_period).mean()
+
+            curr_close = close.iloc[-1]
+            # 강한 하락 추세의 역추세 매수, 강한 상승 추세의 역추세 숏을 피하기 위한 약한 필터
+            if curr_close < lower.iloc[-1] and curr_close >= trend.iloc[-1] * 0.92:
+                return 1
+            if curr_close > upper.iloc[-1] and curr_close <= trend.iloc[-1] * 1.08:
+                return -1
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def williams_r_signals(params: dict) -> Callable:
+        lookback = int(params.get('lookback', 14))
+        oversold = float(params.get('oversold', -80))
+        overbought = float(params.get('overbought', -20))
+        trend_period = int(params.get('trend_period', 80))
+
+        def signal_func(data, idx):
+            if idx < max(lookback + 5, trend_period + 5):
+                return 0
+
+            high = data['High']
+            low = data['Low']
+            close = data['Close']
+            hh = high.iloc[-lookback:].max()
+            ll = low.iloc[-lookback:].min()
+            if hh == ll:
+                return 0
+
+            wr = -100 * (hh - close.iloc[-1]) / (hh - ll)
+            trend = close.rolling(trend_period).mean().iloc[-1]
+
+            if wr <= oversold and close.iloc[-1] >= trend * 0.95:
+                return 1
+            if wr >= overbought and close.iloc[-1] <= trend * 1.05:
+                return -1
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def dual_thrust_signals(params: dict) -> Callable:
+        lookback = int(params.get('lookback', 4))
+        k1 = float(params.get('k1', 0.5))
+        k2 = float(params.get('k2', 0.5))
+
+        def signal_func(data, idx):
+            if idx < lookback + 5:
+                return 0
+
+            high_n = data['High'].iloc[-lookback-1:-1].max()
+            low_n = data['Low'].iloc[-lookback-1:-1].min()
+            close_n = data['Close'].iloc[-lookback-1:-1]
+            range_value = max(high_n - close_n.min(), close_n.max() - low_n)
+            if range_value <= 0:
+                return 0
+
+            open_today = data['Open'].iloc[-1]
+            upper = open_today + k1 * range_value
+            lower = open_today - k2 * range_value
+            curr_close = data['Close'].iloc[-1]
+
+            if curr_close > upper:
+                return 1
+            if curr_close < lower:
+                return -1
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def volatility_breakout_signals(params: dict) -> Callable:
+        lookback = int(params.get('lookback', 20))
+        k = float(params.get('k', 0.5))
+        atr_period = int(params.get('atr_period', 14))
+
+        def signal_func(data, idx):
+            if idx < max(lookback + 5, atr_period + 5):
+                return 0
+
+            prev_high = data['High'].iloc[-lookback-1:-1].max()
+            prev_low = data['Low'].iloc[-lookback-1:-1].min()
+            prev_close = data['Close'].iloc[-2]
+            breakout_up = prev_close + (prev_high - prev_low) * k
+            breakout_dn = prev_close - (prev_high - prev_low) * k
+
+            atr = StrategySignals._atr(data, atr_period)
+            atr_now = float(atr.iloc[-1]) if not np.isnan(atr.iloc[-1]) else 0.0
+            atr_med = float(atr.iloc[-(atr_period * 2):].median()) if len(atr) >= atr_period * 2 else atr_now
+            if atr_med > 0 and atr_now < atr_med * 0.7:
+                return 0
+
+            curr_close = data['Close'].iloc[-1]
+            if curr_close > breakout_up:
+                return 1
+            if curr_close < breakout_dn:
+                return -1
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def ma_cross_signals(params: dict) -> Callable:
+        short_window = int(params.get('short_window', 20))
+        long_window = int(params.get('long_window', 60))
+
+        def signal_func(data, idx):
+            if idx < long_window + 5:
+                return 0
+            close = data['Close']
+            short_ma = close.rolling(short_window).mean()
+            long_ma = close.rolling(long_window).mean()
+            if short_ma.iloc[-1] > long_ma.iloc[-1] and short_ma.iloc[-2] <= long_ma.iloc[-2]:
+                return 1
+            if short_ma.iloc[-1] < long_ma.iloc[-1] and short_ma.iloc[-2] >= long_ma.iloc[-2]:
+                return -1
+            return 0
+
+        return signal_func
+
     # --- 5. 理쒖떊/怨좉툒 ?꾨왂 (ML & Structure) ---
 
     @staticmethod

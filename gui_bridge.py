@@ -4,6 +4,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -15,6 +16,12 @@ STRATEGY_MAP = {
     "Turtle": StrategySignals.turtle_signals,
     "RSI2": StrategySignals.rsi2_signals,
     "Momentum": StrategySignals.momentum_signals,
+    "SuperTrend": StrategySignals.supertrend_signals,
+    "Bollinger Reversion": StrategySignals.bollinger_reversion_signals,
+    "Williams %R": StrategySignals.williams_r_signals,
+    "Dual Thrust": StrategySignals.dual_thrust_signals,
+    "Volatility Breakout": StrategySignals.volatility_breakout_signals,
+    "MA Cross": StrategySignals.ma_cross_signals,
     "ML Ensemble": StrategySignals.ml_ensemble_signals,
     "Regime Switching": StrategySignals.regime_switching_signals,
     "Liquidity Sweep": StrategySignals.liquidity_sweep_signals,
@@ -22,12 +29,22 @@ STRATEGY_MAP = {
     "ATR Breakout VolTarget": StrategySignals.atr_breakout_vol_target_signals,
     "Z-Score Mean Reversion": StrategySignals.zscore_mean_reversion_signals,
     "MACD Regime": StrategySignals.macd_regime_signals,
+    "Turtle + Momentum Confirm": StrategySignals.turtle_momentum_confirm_signals,
+    "RSI2 + Bollinger Reversion": StrategySignals.rsi2_bollinger_reversion_signals,
+    "Regime + Liquidity Sweep": StrategySignals.regime_liquidity_sweep_signals,
+    "Adaptive Fractal Regime": StrategySignals.adaptive_fractal_regime_signals,
 }
 
 DEFAULT_PARAMS = {
     "Turtle": {"entry_period": 20, "exit_period": 10},
     "RSI2": {"sma_period": 200, "oversold": 10, "overbought": 90},
     "Momentum": {"lookback": 126, "sma_filter": 200},
+    "SuperTrend": {"atr_period": 10, "multiplier": 3.0},
+    "Bollinger Reversion": {"window": 20, "num_std": 2.0, "trend_period": 120},
+    "Williams %R": {"lookback": 14, "oversold": -80, "overbought": -20, "trend_period": 80},
+    "Dual Thrust": {"lookback": 4, "k1": 0.5, "k2": 0.5},
+    "Volatility Breakout": {"lookback": 20, "k": 0.5, "atr_period": 14},
+    "MA Cross": {"short_window": 20, "long_window": 60},
     "ML Ensemble": {"lookback": 252},
     "Regime Switching": {"vol_lookback": 20, "threshold": 1.5},
     "Liquidity Sweep": {"lookback": 20},
@@ -41,6 +58,35 @@ DEFAULT_PARAMS = {
     },
     "Z-Score Mean Reversion": {"window": 30, "entry_z": 2.0, "exit_z": 0.5, "trend_period": 100},
     "MACD Regime": {"fast": 12, "slow": 26, "signal_period": 9, "vol_window": 20, "high_vol_threshold": 1.2},
+    "Turtle + Momentum Confirm": {
+        "entry_period": 20,
+        "exit_period": 10,
+        "momentum_lookback": 60,
+        "momentum_threshold": 0.01,
+    },
+    "RSI2 + Bollinger Reversion": {
+        "rsi_period": 2,
+        "oversold": 8,
+        "overbought": 92,
+        "bb_window": 20,
+        "bb_std": 2.0,
+        "trend_period": 100,
+    },
+    "Regime + Liquidity Sweep": {
+        "vol_lookback": 20,
+        "regime_threshold": 1.2,
+        "sweep_lookback": 20,
+        "confirm_momentum": 10,
+    },
+    "Adaptive Fractal Regime": {
+        "trend_lookback": 55,
+        "mean_window": 20,
+        "z_entry": 1.6,
+        "chop_window": 14,
+        "chop_threshold": 58,
+        "atr_period": 14,
+        "target_daily_vol": 0.012,
+    },
 }
 
 DEFAULT_SYMBOLS = (
@@ -119,7 +165,7 @@ class StrategyBridgeApp:
         ttk.Label(top, text="기간").grid(row=0, column=2, sticky=tk.W, padx=4, pady=4)
         self.period_var = tk.StringVar(value="2y")
         period_combo = ttk.Combobox(top, textvariable=self.period_var, state="readonly", width=10)
-        period_combo["values"] = ("6mo", "1y", "2y", "5y", "max")
+        period_combo["values"] = ("1mo", "3mo", "6mo", "1y", "2y", "5y", "max")
         period_combo.grid(row=0, column=3, sticky=tk.W, padx=4, pady=4)
 
         ttk.Label(top, text="전략").grid(row=0, column=4, sticky=tk.W, padx=4, pady=4)
@@ -143,6 +189,13 @@ class StrategyBridgeApp:
         self.test_all_button = ttk.Button(actions, text="1-A) 전체 전략 일괄 테스트", command=self._run_all_strategies)
         self.test_all_button.pack(side=tk.LEFT, padx=4)
 
+        self.test_all_periods_button = ttk.Button(
+            actions,
+            text="1-B) 전체 전략×기간(1mo~5y) 일괄 테스트",
+            command=self._run_all_strategies_all_periods,
+        )
+        self.test_all_periods_button.pack(side=tk.LEFT, padx=4)
+
         self.apply_button = ttk.Button(
             actions,
             text="2) ultra_quant.py에 즉시 적용",
@@ -165,6 +218,25 @@ class StrategyBridgeApp:
     def _append_output(self, text: str):
         self.output_text.insert(tk.END, text + "\n")
         self.output_text.see(tk.END)
+
+    @staticmethod
+    def _composite_score(sharpe: float, total_return: float, max_drawdown: float) -> float:
+        # 개선된 복합 점수:
+        # - Return: tanh 반감(포화) 처리로 극단값 영향 완화
+        # - MDD: 0~20% 구간 제곱 페널티 + 20% 초과 구간 로그 페널티
+        ret_pct = total_return * 100.0
+        mdd_pct = abs(max_drawdown) * 100.0
+
+        # Return 반감기(포화): +/-20% 부근부터 기여 증가율 완만
+        ret_effect = 20.0 * np.tanh(ret_pct / 20.0)
+
+        # MDD 비선형 페널티
+        capped = min(mdd_pct, 20.0)
+        mdd_quad = (capped * capped) / 20.0
+        mdd_tail = 5.0 * np.log1p(max(0.0, mdd_pct - 20.0))
+        mdd_penalty = mdd_quad + mdd_tail
+
+        return (0.6 * sharpe) + (0.4 * ret_effect) - (0.3 * mdd_penalty)
 
     def _parse_params(self):
         raw = self.params_text.get("1.0", tk.END).strip()
@@ -194,6 +266,7 @@ class StrategyBridgeApp:
         state = tk.DISABLED if running else tk.NORMAL
         self.test_button.config(state=state)
         self.test_all_button.config(state=state)
+        self.test_all_periods_button.config(state=state)
         if running:
             self.apply_button.config(state=tk.DISABLED)
         elif self.last_df is not None and self.last_strategy_params is not None:
@@ -231,6 +304,97 @@ class StrategyBridgeApp:
                     f"- Trades: {len(result.trades)}",
                 ]
                 self.root.after(0, lambda: self._append_output("\n".join(lines)))
+                self.root.after(0, lambda: self.apply_button.config(state=tk.NORMAL))
+            except Exception as exc:
+                self.root.after(0, lambda: messagebox.showerror("오류", str(exc)))
+            finally:
+                self.root.after(0, lambda: self._set_running(False))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_all_strategies_all_periods(self):
+        self._set_running(True)
+
+        def worker():
+            try:
+                symbol = self.symbol_var.get().strip().upper()
+                selected_strategy = self.strategy_var.get().strip()
+                selected_params = self._parse_params()
+                periods = ("1mo", "3mo", "6mo", "1y", "2y", "5y")
+
+                backtester = StrategyBacktester()
+                rows = []
+                best_payload = None
+
+                for period in periods:
+                    try:
+                        df = self._load_data(symbol, period)
+                    except Exception as data_exc:
+                        rows.append({"period": period, "name": "(data)", "error": str(data_exc)})
+                        continue
+
+                    for strategy_name, signal_factory in STRATEGY_MAP.items():
+                        try:
+                            params = DEFAULT_PARAMS.get(strategy_name, {}).copy()
+                            if strategy_name == selected_strategy:
+                                params = selected_params
+                            signal_func = signal_factory(params)
+                            result = backtester.run_backtest(df, signal_func, strategy_name=strategy_name)
+                            metrics = result.metrics
+
+                            row = {
+                                "period": period,
+                                "name": strategy_name,
+                                "params": params,
+                                "df": df,
+                                "sharpe": float(metrics.get("Sharpe Ratio", 0.0)),
+                                "ret": float(metrics.get("Total Return", 0.0)),
+                                "mdd": float(metrics.get("Max Drawdown", 0.0)),
+                                "trades": len(result.trades),
+                            }
+                            row["score"] = self._composite_score(row["sharpe"], row["ret"], row["mdd"])
+                            rows.append(row)
+
+                            if best_payload is None or row["score"] > best_payload["score"]:
+                                best_payload = row
+                        except Exception as strategy_exc:
+                            rows.append({"period": period, "name": strategy_name, "error": str(strategy_exc)})
+
+                ok_rows = [r for r in rows if "error" not in r]
+                if not ok_rows or best_payload is None:
+                    raise RuntimeError("전체 전략×기간 테스트 실패: 성공한 결과가 없습니다.")
+
+                ok_rows.sort(key=lambda x: x["score"], reverse=True)
+
+                self.last_df = best_payload["df"]
+                self.last_strategy_name = best_payload["name"]
+                self.last_strategy_params = best_payload["params"]
+
+                out_lines = [
+                    "",
+                    f"[전체 전략×기간 테스트 완료] {symbol} | periods={','.join(periods)}",
+                    "복합 점수 기준 상위 결과 (Return 반감 + MDD 비선형 페널티):",
+                ]
+                for idx, row in enumerate(ok_rows[:20], start=1):
+                    out_lines.append(
+                        f"{idx}. [{row['period']}] {row['name']} | Score {row['score']:.3f} | Sharpe {row['sharpe']:.3f} | "
+                        f"Return {row['ret']:.2%} | MDD {row['mdd']:.2%} | Trades {row['trades']}"
+                    )
+
+                failed = [r for r in rows if "error" in r]
+                if failed:
+                    out_lines.append("")
+                    out_lines.append(f"실패 항목: {len(failed)}개")
+                    for row in failed[:5]:
+                        out_lines.append(f"- [{row.get('period', '-')}] {row.get('name', '-')}: {row['error']}")
+
+                out_lines.append("")
+                out_lines.append(
+                    f"즉시 적용 대상(최고 점수): [{best_payload['period']}] {best_payload['name']}"
+                )
+                out_lines.append(f"파라미터: {json.dumps(best_payload['params'], ensure_ascii=False)}")
+
+                self.root.after(0, lambda: self._append_output("\n".join(out_lines)))
                 self.root.after(0, lambda: self.apply_button.config(state=tk.NORMAL))
             except Exception as exc:
                 self.root.after(0, lambda: messagebox.showerror("오류", str(exc)))
@@ -283,7 +447,9 @@ class StrategyBridgeApp:
                 if not ok_rows:
                     raise RuntimeError("전체 전략 테스트 실패: 성공한 전략이 없습니다.")
 
-                ok_rows.sort(key=lambda x: x["sharpe"], reverse=True)
+                for row in ok_rows:
+                    row["score"] = self._composite_score(row["sharpe"], row["ret"], row["mdd"])
+                ok_rows.sort(key=lambda x: x["score"], reverse=True)
                 best = ok_rows[0]
 
                 self.last_df = df
@@ -293,11 +459,11 @@ class StrategyBridgeApp:
                 out_lines = [
                     "",
                     f"[전체 전략 테스트 완료] {symbol} | {period}",
-                    "Sharpe 기준 상위 결과:",
+                    "복합 점수 기준 상위 결과 (Return 반감 + MDD 비선형 페널티):",
                 ]
                 for idx, row in enumerate(ok_rows[:10], start=1):
                     out_lines.append(
-                        f"{idx}. {row['name']} | Sharpe {row['sharpe']:.3f} | Return {row['ret']:.2%} | "
+                        f"{idx}. {row['name']} | Score {row['score']:.3f} | Sharpe {row['sharpe']:.3f} | Return {row['ret']:.2%} | "
                         f"MDD {row['mdd']:.2%} | Trades {row['trades']}"
                     )
 
@@ -309,7 +475,7 @@ class StrategyBridgeApp:
                         out_lines.append(f"- {row['name']}: {row['error']}")
 
                 out_lines.append("")
-                out_lines.append(f"즉시 적용 대상(최고 Sharpe): {best['name']}")
+                out_lines.append(f"즉시 적용 대상(최고 점수): {best['name']}")
                 out_lines.append(f"파라미터: {json.dumps(best['params'], ensure_ascii=False)}")
 
                 self.root.after(0, lambda: self._append_output("\n".join(out_lines)))
@@ -341,6 +507,40 @@ class StrategyBridgeApp:
             mapped["lookback"] = max(10, lookback)
             mapped["sma_short"] = max(5, lookback // 3)
             mapped["sma_long"] = max(mapped["sma_short"] + 10, sma_filter)
+        elif strategy_name == "SuperTrend":
+            atr_period = int(params.get("atr_period", 10))
+            mapped["lookback"] = max(10, atr_period * 2)
+            mapped["sma_short"] = max(5, atr_period)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, atr_period * 6)
+        elif strategy_name == "Bollinger Reversion":
+            window = int(params.get("window", 20))
+            trend_period = int(params.get("trend_period", 120))
+            mapped["lookback"] = max(10, window)
+            mapped["sma_short"] = max(5, window // 2)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, trend_period)
+        elif strategy_name == "Williams %R":
+            lookback = int(params.get("lookback", 14))
+            trend_period = int(params.get("trend_period", 80))
+            mapped["lookback"] = max(10, lookback)
+            mapped["sma_short"] = max(5, lookback // 2)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, trend_period)
+        elif strategy_name == "Dual Thrust":
+            lookback = int(params.get("lookback", 4))
+            mapped["lookback"] = max(10, lookback * 5)
+            mapped["sma_short"] = max(5, lookback * 2)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, lookback * 10)
+        elif strategy_name == "Volatility Breakout":
+            lookback = int(params.get("lookback", 20))
+            atr_period = int(params.get("atr_period", 14))
+            mapped["lookback"] = max(10, lookback)
+            mapped["sma_short"] = max(5, atr_period)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, lookback * 2)
+        elif strategy_name == "MA Cross":
+            short_window = int(params.get("short_window", 20))
+            long_window = int(params.get("long_window", 60))
+            mapped["lookback"] = max(10, long_window)
+            mapped["sma_short"] = max(5, short_window)
+            mapped["sma_long"] = max(mapped["sma_short"] + 5, long_window)
         elif strategy_name == "ML Ensemble":
             lookback = int(params.get("lookback", 252))
             mapped["lookback"] = max(20, lookback // 3)
@@ -381,6 +581,31 @@ class StrategyBridgeApp:
             mapped["lookback"] = max(10, slow)
             mapped["sma_short"] = max(5, fast)
             mapped["sma_long"] = max(mapped["sma_short"] + 5, slow)
+        elif strategy_name == "Turtle + Momentum Confirm":
+            entry = int(params.get("entry_period", 20))
+            momentum_lookback = int(params.get("momentum_lookback", 60))
+            mapped["lookback"] = max(10, entry)
+            mapped["sma_short"] = max(5, entry // 2)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, momentum_lookback)
+        elif strategy_name == "RSI2 + Bollinger Reversion":
+            bb_window = int(params.get("bb_window", 20))
+            trend_period = int(params.get("trend_period", 100))
+            mapped["lookback"] = max(10, bb_window)
+            mapped["sma_short"] = max(5, bb_window // 2)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, trend_period)
+        elif strategy_name == "Regime + Liquidity Sweep":
+            sweep_lookback = int(params.get("sweep_lookback", 20))
+            confirm_momentum = int(params.get("confirm_momentum", 10))
+            mapped["lookback"] = max(10, sweep_lookback)
+            mapped["sma_short"] = max(5, confirm_momentum)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, sweep_lookback * 2)
+        elif strategy_name == "Adaptive Fractal Regime":
+            trend_lookback = int(params.get("trend_lookback", 55))
+            mean_window = int(params.get("mean_window", 20))
+            mapped["lookback"] = max(10, trend_lookback)
+            mapped["sma_short"] = max(5, mean_window // 2)
+            mapped["sma_long"] = max(mapped["sma_short"] + 10, trend_lookback)
+            mapped["target_vol"] = float(params.get("target_daily_vol", 0.012)) * 16.0
 
         if mapped["sma_short"] >= mapped["sma_long"]:
             mapped["sma_long"] = mapped["sma_short"] + 5
@@ -416,7 +641,7 @@ def main():
     root = tk.Tk()
     app = StrategyBridgeApp(root)
     app._append_output("UltraQuant 전략 브리지 준비 완료")
-    app._append_output("1) 전략 테스트 또는 1-A) 전체 전략 테스트 후 2) 즉시 적용을 실행하세요.")
+    app._append_output("1) 전략 테스트 또는 1-A/1-B) 전체 전략 테스트 후 2) 즉시 적용을 실행하세요.")
     app._append_output("심볼 목록은 symbols.json 파일을 우선 사용합니다.")
     root.mainloop()
 

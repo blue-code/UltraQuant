@@ -291,13 +291,14 @@ python gui_bridge.py
 
 ### 화면 사용 순서
 1. 심볼 선택
-2. 기간 선택 (`6mo`, `1y`, `2y`, `5y`, `max`)
+2. 기간 선택 (`1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `max`)
 3. 전략 선택
 4. 필요 시 JSON 파라미터 수정
 5. 아래 중 하나 실행
    - `1) strategy.py로 테스트`: 선택한 전략만 실행
-   - `1-A) 전체 전략 일괄 테스트`: 등록된 모든 전략 실행 후 Sharpe 순 정렬
-6. `2) ultra_quant.py에 즉시 적용`: 마지막 테스트 대상(일괄 테스트 시 최고 Sharpe 전략)을 바로 적용
+   - `1-A) 전체 전략 일괄 테스트`: 등록된 모든 전략 실행 후 복합 점수 순 정렬
+   - `1-B) 전체 전략×기간(1mo~5y) 일괄 테스트`: 기간별 전체 전략 실행 후 복합 점수 순 정렬
+6. `2) ultra_quant.py에 즉시 적용`: 마지막 테스트 대상(일괄 테스트 시 최고 점수 전략)을 바로 적용
 
 ### symbols.json으로 심볼 목록 관리
 GUI 심볼 목록은 루트의 `symbols.json`을 우선 사용합니다.
@@ -450,3 +451,58 @@ out = runner.run(
 
 - 목적: CP949 콘솔 환경에서 import 시 발생하던 UnicodeEncodeError 방지
 - 기존 실행/사용법은 동일합니다.
+
+---
+
+## 전략 목록 및 GUI 기능 (현재 기준)
+
+### 현재 지원 전략 수
+현재 `StrategySignals` + GUI 연동 기준으로 총 **20개 전략**을 지원합니다.
+
+### 전략 목록 (20)
+1. Turtle
+2. RSI2
+3. Momentum
+4. SuperTrend
+5. Bollinger Reversion
+6. Williams %R
+7. Dual Thrust
+8. Volatility Breakout
+9. MA Cross
+10. ML Ensemble
+11. Regime Switching
+12. Liquidity Sweep
+13. Adaptive EMA+ADX
+14. ATR Breakout VolTarget
+15. Z-Score Mean Reversion
+16. MACD Regime
+17. Turtle + Momentum Confirm
+18. RSI2 + Bollinger Reversion
+19. Regime + Liquidity Sweep
+20. Adaptive Fractal Regime
+
+### GUI 일괄 테스트 모드
+GUI(`gui_bridge.py`)의 실행 버튼은 아래 3가지를 지원합니다.
+
+- `1) strategy.py로 테스트`
+  - 선택 전략 1개만 실행
+- `1-A) 전체 전략 일괄 테스트`
+  - 선택한 단일 기간에서 전체 전략 실행
+  - 상위 10개 결과를 표시
+- `1-B) 전체 전략×기간(1mo~5y) 일괄 테스트`
+  - 기간 `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y` 각각에 대해 전체 전략 실행
+  - 전체 결과를 복합 점수 기준으로 정렬
+  - 상위 20개 결과를 표시
+  - 최고 점수 결과를 `2) ultra_quant.py에 즉시 적용` 대상으로 자동 설정
+
+### 복합 점수 산식 (정렬 기준)
+GUI의 전체 전략 정렬은 Sharpe 단일 지표가 아니라 아래 복합 점수를 사용합니다.
+
+- Return: `tanh` 포화 적용(과도한 고수익 단일 케이스 영향 완화)
+- MDD: 0~20% 구간 제곱 페널티 + 20% 초과 구간 로그 페널티
+- 최종식: `Score = 0.6*Sharpe + 0.4*ReturnEffect - 0.3*MDDPenalty`
+
+### 기간 선택
+GUI 기간 콤보박스는 현재 아래 값을 지원합니다.
+
+- `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `max`

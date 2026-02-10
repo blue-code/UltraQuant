@@ -100,6 +100,42 @@ class TestUltraQuant(unittest.TestCase):
         )
         self.assertIn('Total Return', res_macd.metrics)
 
+        res_supertrend = backtester.run_backtest(
+            self.df,
+            StrategySignals.supertrend_signals({'atr_period': 10, 'multiplier': 3.0}),
+        )
+        self.assertIn('Total Return', res_supertrend.metrics)
+
+        res_bb = backtester.run_backtest(
+            self.df,
+            StrategySignals.bollinger_reversion_signals({'window': 20, 'num_std': 2.0}),
+        )
+        self.assertIn('Total Return', res_bb.metrics)
+
+        res_wr = backtester.run_backtest(
+            self.df,
+            StrategySignals.williams_r_signals({'lookback': 14, 'oversold': -80, 'overbought': -20}),
+        )
+        self.assertIn('Total Return', res_wr.metrics)
+
+        res_dual = backtester.run_backtest(
+            self.df,
+            StrategySignals.dual_thrust_signals({'lookback': 4, 'k1': 0.5, 'k2': 0.5}),
+        )
+        self.assertIn('Total Return', res_dual.metrics)
+
+        res_vb = backtester.run_backtest(
+            self.df,
+            StrategySignals.volatility_breakout_signals({'lookback': 20, 'k': 0.5, 'atr_period': 14}),
+        )
+        self.assertIn('Total Return', res_vb.metrics)
+
+        res_ma = backtester.run_backtest(
+            self.df,
+            StrategySignals.ma_cross_signals({'short_window': 20, 'long_window': 60}),
+        )
+        self.assertIn('Total Return', res_ma.metrics)
+
     def test_backtest_report_and_excess_metrics(self):
         backtester = StrategyBacktester(open_cost=0.001, close_cost=0.0015, min_cost=1.0, impact_cost=0.0002)
         result = backtester.run_backtest(self.df, StrategySignals.momentum_signals({'lookback': 80, 'sma_filter': 120}))
