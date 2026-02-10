@@ -175,6 +175,42 @@ class StrategyBacktester:
 
 class StrategySignals:
     @staticmethod
+    def _atr(data: pd.DataFrame, period: int = 14) -> pd.Series:
+        high = data['High']
+        low = data['Low']
+        close = data['Close']
+        prev_close = close.shift(1)
+        tr = pd.concat(
+            [
+                (high - low),
+                (high - prev_close).abs(),
+                (low - prev_close).abs()
+            ],
+            axis=1
+        ).max(axis=1)
+        return tr.rolling(period).mean()
+
+    @staticmethod
+    def _adx(data: pd.DataFrame, period: int = 14) -> pd.Series:
+        high = data['High']
+        low = data['Low']
+
+        up_move = high.diff()
+        down_move = -low.diff()
+
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+
+        plus_dm = pd.Series(plus_dm, index=data.index)
+        minus_dm = pd.Series(minus_dm, index=data.index)
+        atr = StrategySignals._atr(data, period).replace(0, np.nan)
+
+        plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
+        dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)).fillna(0)
+        return dx.rolling(period).mean()
+
+    @staticmethod
     def turtle_signals(params: dict) -> Callable:
         entry_period = int(params.get('entry_period', 20))
         exit_period = int(params.get('exit_period', 10))
@@ -323,6 +359,174 @@ class StrategySignals:
                 return -1
                 
             return 0
+        return signal_func
+
+    @staticmethod
+    def adaptive_ema_adx_signals(params: dict) -> Callable:
+        """
+        최신형 추세 추종:
+        EMA 교차 + ADX 강도 필터로 횡보장 노이즈를 줄임
+        """
+        fast_period = int(params.get('fast_period', 20))
+        slow_period = int(params.get('slow_period', 100))
+        adx_period = int(params.get('adx_period', 14))
+        adx_threshold = float(params.get('adx_threshold', 20))
+
+        def signal_func(data, idx):
+            if idx < max(slow_period, adx_period * 2):
+                return 0
+
+            close = data['Close']
+            ema_fast = close.ewm(span=fast_period, adjust=False).mean()
+            ema_slow = close.ewm(span=slow_period, adjust=False).mean()
+            adx = StrategySignals._adx(data, adx_period)
+
+            trend_up = ema_fast.iloc[-1] > ema_slow.iloc[-1]
+            trend_down = ema_fast.iloc[-1] < ema_slow.iloc[-1]
+
+            adx_val = float(adx.iloc[-1]) if not np.isnan(adx.iloc[-1]) else 0.0
+            if adx_val < adx_threshold:
+                return 0
+
+            # ADX가 높을수록 신호 강도를 높여 진입 임계치(0.3) 통과를 보장
+            strength = float(np.clip((adx_val - adx_threshold) / 20.0, 0.35, 1.0))
+            if trend_up:
+                return strength
+            if trend_down:
+                return -strength
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def atr_breakout_vol_target_signals(params: dict) -> Callable:
+        """
+        최신형 돌파 전략:
+        Donchian 돌파 + ATR 필터 + 변동성 타게팅 포지션 강도
+        """
+        lookback = int(params.get('lookback', 55))
+        atr_period = int(params.get('atr_period', 20))
+        atr_filter = float(params.get('atr_filter', 0.8))
+        vol_lookback = int(params.get('vol_lookback', 20))
+        target_daily_vol = float(params.get('target_daily_vol', 0.012))
+
+        def signal_func(data, idx):
+            min_lb = max(lookback + 2, atr_period + 2, vol_lookback + 2)
+            if idx < min_lb:
+                return 0
+
+            close = data['Close']
+            high = data['High']
+            low = data['Low']
+
+            upper = high.iloc[-lookback-1:-1].max()
+            lower = low.iloc[-lookback-1:-1].min()
+            atr = StrategySignals._atr(data, atr_period)
+            curr_atr = float(atr.iloc[-1]) if not np.isnan(atr.iloc[-1]) else 0.0
+            atr_med = float(atr.iloc[-(atr_period * 2):].median()) if len(atr) >= atr_period * 2 else curr_atr
+
+            # 너무 조용한 장은 제외
+            if atr_med <= 0 or curr_atr < atr_med * atr_filter:
+                return 0
+
+            realized_vol = float(close.pct_change().rolling(vol_lookback).std().iloc[-1])
+            if np.isnan(realized_vol) or realized_vol <= 0:
+                vol_scale = 0.5
+            else:
+                vol_scale = float(np.clip(target_daily_vol / realized_vol, 0.35, 1.0))
+
+            curr_close = close.iloc[-1]
+            if curr_close > upper:
+                return vol_scale
+            if curr_close < lower:
+                return -vol_scale
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def zscore_mean_reversion_signals(params: dict) -> Callable:
+        """
+        최신형 평균회귀:
+        Z-Score 기반 과매수/과매도 + 장기 추세 필터 결합
+        """
+        window = int(params.get('window', 30))
+        entry_z = float(params.get('entry_z', 2.0))
+        exit_z = float(params.get('exit_z', 0.5))
+        trend_period = int(params.get('trend_period', 100))
+
+        def signal_func(data, idx):
+            if idx < max(window + 2, trend_period + 2):
+                return 0
+
+            close = data['Close']
+            mean = close.rolling(window).mean()
+            std = close.rolling(window).std().replace(0, np.nan)
+            z = ((close - mean) / std).fillna(0)
+
+            long_sma = close.rolling(trend_period).mean()
+            curr_close = close.iloc[-1]
+            curr_z = float(z.iloc[-1])
+
+            # 상승 추세에서는 눌림 매수, 하락 추세에서는 반등 숏
+            if curr_close > long_sma.iloc[-1]:
+                if curr_z <= -entry_z:
+                    return 1
+                if curr_z >= -exit_z:
+                    return 0
+            else:
+                if curr_z >= entry_z:
+                    return -1
+                if curr_z <= exit_z:
+                    return 0
+            return 0
+
+        return signal_func
+
+    @staticmethod
+    def macd_regime_signals(params: dict) -> Callable:
+        """
+        최신형 레짐 전략:
+        MACD 히스토그램 방향 + 변동성 레짐 필터
+        """
+        fast = int(params.get('fast', 12))
+        slow = int(params.get('slow', 26))
+        signal_period = int(params.get('signal_period', 9))
+        vol_window = int(params.get('vol_window', 20))
+        high_vol_threshold = float(params.get('high_vol_threshold', 1.2))
+
+        def signal_func(data, idx):
+            if idx < max(slow + signal_period + 5, vol_window + 5):
+                return 0
+
+            close = data['Close']
+            ema_fast = close.ewm(span=fast, adjust=False).mean()
+            ema_slow = close.ewm(span=slow, adjust=False).mean()
+            macd = ema_fast - ema_slow
+            macd_signal = macd.ewm(span=signal_period, adjust=False).mean()
+            hist = macd - macd_signal
+
+            returns = close.pct_change()
+            curr_vol = returns.iloc[-vol_window:].std()
+            avg_vol = returns.rolling(100).std().iloc[-1]
+            if np.isnan(curr_vol) or np.isnan(avg_vol) or avg_vol <= 0:
+                return 0
+
+            # 고변동 레짐에서는 보수적으로 강한 히스토그램만 채택
+            if curr_vol > avg_vol * high_vol_threshold:
+                if hist.iloc[-1] > 0 and hist.iloc[-1] > hist.iloc[-2]:
+                    return 0.7
+                if hist.iloc[-1] < 0 and hist.iloc[-1] < hist.iloc[-2]:
+                    return -0.7
+                return 0
+
+            # 저변동 레짐에서는 교차 중심
+            if hist.iloc[-1] > 0 and hist.iloc[-2] <= 0:
+                return 1
+            if hist.iloc[-1] < 0 and hist.iloc[-2] >= 0:
+                return -1
+            return 0
+
         return signal_func
 
 # ============================================ 

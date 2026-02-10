@@ -267,3 +267,51 @@ python -m unittest discover -s tests -p "test_*.py"
 - `ModuleNotFoundError`: 가상환경 활성화 여부 확인 후 `pip install -r requirements.txt` 재실행
 - GUI가 안 뜸: `python gui_bridge.py`를 직접 실행해 오류 메시지 확인
 - 한글 깨짐: PowerShell에서 `chcp 65001` 실행 후 다시 확인
+
+---
+
+## GUI 상세 사용법 (전략 브리지 최신)
+
+### 핵심 기능 요약
+- `gui_bridge.py`는 `strategy.py` 전략 백테스트와 `ultra_quant.py` 적용을 한 화면에서 연결합니다.
+- 단일 전략 테스트와 **전체 전략 일괄 테스트**를 모두 지원합니다.
+- 심볼은 텍스트 입력이 아니라 **셀렉트박스**에서 선택합니다.
+
+### 실행 방법
+```bat
+run.bat
+```
+- 메뉴에서 `2`를 선택하면 GUI가 실행됩니다.
+
+또는 수동 실행:
+```bat
+venv\Scripts\activate
+python gui_bridge.py
+```
+
+### 화면 사용 순서
+1. 심볼 선택
+2. 기간 선택 (`6mo`, `1y`, `2y`, `5y`, `max`)
+3. 전략 선택
+4. 필요 시 JSON 파라미터 수정
+5. 아래 중 하나 실행
+   - `1) strategy.py로 테스트`: 선택한 전략만 실행
+   - `1-A) 전체 전략 일괄 테스트`: 등록된 모든 전략 실행 후 Sharpe 순 정렬
+6. `2) ultra_quant.py에 즉시 적용`: 마지막 테스트 대상(일괄 테스트 시 최고 Sharpe 전략)을 바로 적용
+
+### symbols.json으로 심볼 목록 관리
+GUI 심볼 목록은 루트의 `symbols.json`을 우선 사용합니다.
+
+예시:
+```json
+{
+  "symbols": ["SPY", "QQQ", "AAPL", "BTC-USD", "EURUSD=X"]
+}
+```
+
+- 파일이 없거나 형식이 잘못되면 내부 기본 목록으로 자동 폴백됩니다.
+- 심볼을 바꾸면 불러오는 OHLC 데이터가 달라지므로, 백테스트 결과도 함께 달라집니다.
+
+### SPY 의미
+- `SPY`는 **SPDR S&P 500 ETF** 티커입니다.
+- 미국 대형주 지수(S&P 500)를 추종하므로, 전략 검증의 기본 벤치마크 심볼로 자주 사용됩니다.
