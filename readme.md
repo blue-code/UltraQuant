@@ -315,3 +315,67 @@ GUI 심볼 목록은 루트의 `symbols.json`을 우선 사용합니다.
 ### SPY 의미
 - `SPY`는 **SPDR S&P 500 ETF** 티커입니다.
 - 미국 대형주 지수(S&P 500)를 추종하므로, 전략 검증의 기본 벤치마크 심볼로 자주 사용됩니다.
+
+---
+
+## 신규 전략 추가 가이드 (StrategySignals)
+
+`strategy.py`의 `StrategySignals`에 다음 전략이 추가되었습니다.
+
+### 1) Turtle + Momentum Confirm
+- 함수: `turtle_momentum_confirm_signals(params)`
+- 목적: 단순 돌파의 휩쏘를 줄이기 위해, 채널 돌파와 중기 모멘텀 동시 확인
+- 주요 파라미터:
+  - `entry_period` (기본 20)
+  - `exit_period` (기본 10)
+  - `momentum_lookback` (기본 60)
+  - `momentum_threshold` (기본 0.01)
+
+### 2) RSI2 + Bollinger Reversion
+- 함수: `rsi2_bollinger_reversion_signals(params)`
+- 목적: RSI2 단독 신호의 과진입을 줄이기 위해 볼린저 밴드 이탈 조건을 추가
+- 주요 파라미터:
+  - `rsi_period` (기본 2)
+  - `oversold` / `overbought` (기본 8 / 92)
+  - `bb_window` / `bb_std` (기본 20 / 2.0)
+  - `trend_period` (기본 100)
+
+### 3) Regime + Liquidity Sweep
+- 함수: `regime_liquidity_sweep_signals(params)`
+- 목적: 유동성 스윕 신호를 변동성 레짐 필터와 결합해 가짜 신호를 완화
+- 주요 파라미터:
+  - `vol_lookback` (기본 20)
+  - `regime_threshold` (기본 1.2)
+  - `sweep_lookback` (기본 20)
+  - `confirm_momentum` (기본 10)
+
+### 4) Adaptive Fractal Regime (완전 신규)
+- 함수: `adaptive_fractal_regime_signals(params)`
+- 목적: 장세를 자동 분류해
+  - 추세장: Donchian 돌파 추종
+  - 횡보장: z-score 평균회귀
+  로 분기하고, ATR/실현변동성으로 신호 강도를 자동 조절
+- 주요 파라미터:
+  - `trend_lookback` (기본 55)
+  - `mean_window` (기본 20)
+  - `z_entry` (기본 1.6)
+  - `chop_window` / `chop_threshold` (기본 14 / 58)
+  - `atr_period` (기본 14)
+  - `target_daily_vol` (기본 0.012)
+
+### 간단 실행 예시
+```python
+from strategy import StrategyBacktester, StrategySignals
+
+sig = StrategySignals.adaptive_fractal_regime_signals({
+    'trend_lookback': 55,
+    'mean_window': 20,
+    'z_entry': 1.6,
+    'chop_window': 14,
+    'chop_threshold': 58,
+})
+
+bt = StrategyBacktester()
+result = bt.run_backtest(df, sig, strategy_name='adaptive_fractal_regime')
+print(result.metrics)
+```
