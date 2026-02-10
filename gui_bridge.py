@@ -106,6 +106,19 @@ DEFAULT_SYMBOLS = (
     "JPY=X",
 )
 
+# 최근 적합도 반영 설정값
+RECENT_PERIODS = ("3mo", "6mo")
+BASE_WEIGHT = 0.4
+RECENT_WEIGHT = 0.6
+RECENT_GATE_MIN_SCORE = 0.0
+RECENT_GATE_MIN_TRADES = 1
+FINAL_BASE_RECENT_WEIGHT = 0.75
+FINAL_ROLLING_WEIGHT = 0.25
+ROLLING_WINDOW_DAYS = 252
+ROLLING_STEP_DAYS = 63
+ROLLING_GATE_MIN_WINDOWS = 3
+ROLLING_GATE_MIN_WIN_RATIO = 0.5
+
 
 def load_symbol_choices(file_path: str = "symbols.json") -> tuple[str, ...]:
     path = Path(file_path)
@@ -175,6 +188,14 @@ class StrategyBridgeApp:
         strategy_combo.grid(row=0, column=5, sticky=tk.W, padx=4, pady=4)
         strategy_combo.bind("<<ComboboxSelected>>", lambda _: self._on_strategy_changed())
 
+        self.use_rolling_var = tk.BooleanVar(value=True)
+        rolling_check = ttk.Checkbutton(
+            top,
+            text="Rolling 검증(1년 창/3개월 스텝)",
+            variable=self.use_rolling_var,
+        )
+        rolling_check.grid(row=1, column=0, columnspan=6, sticky=tk.W, padx=4, pady=4)
+
         params_frame = ttk.LabelFrame(container, text="전략 파라미터 (JSON)", padding=10)
         params_frame.pack(fill=tk.BOTH, expand=False, pady=10)
         self.params_text = tk.Text(params_frame, height=8, wrap=tk.WORD)
@@ -237,6 +258,114 @@ class StrategyBridgeApp:
         mdd_penalty = mdd_quad + mdd_tail
 
         return (0.6 * sharpe) + (0.4 * ret_effect) - (0.3 * mdd_penalty)
+
+    @staticmethod
+    def _recent_summary(recent_rows: list[dict]) -> dict:
+        if not recent_rows:
+            return {
+                "recent_score": float("-inf"),
+                "recent_trades": 0,
+                "recent_ok": False,
+                "recent_note": "recent 데이터 없음",
+            }
+
+        recent_score = float(np.mean([r["score"] for r in recent_rows]))
+        recent_trades = int(sum(int(r.get("trades", 0)) for r in recent_rows))
+        recent_ok = (recent_score >= RECENT_GATE_MIN_SCORE) and (recent_trades >= RECENT_GATE_MIN_TRADES)
+        note = (
+            "PASS"
+            if recent_ok
+            else f"FAIL(score<{RECENT_GATE_MIN_SCORE:.2f} 또는 trades<{RECENT_GATE_MIN_TRADES})"
+        )
+        return {
+            "recent_score": recent_score,
+            "recent_trades": recent_trades,
+            "recent_ok": recent_ok,
+            "recent_note": note,
+        }
+
+    @staticmethod
+    def _blended_score(base_score: float, recent_score: float) -> float:
+        if np.isfinite(recent_score):
+            return (BASE_WEIGHT * base_score) + (RECENT_WEIGHT * recent_score)
+        return base_score
+
+    @staticmethod
+    def _final_score(blended_score: float, rolling_score: float, use_rolling: bool) -> float:
+        if use_rolling and np.isfinite(rolling_score):
+            return (FINAL_BASE_RECENT_WEIGHT * blended_score) + (FINAL_ROLLING_WEIGHT * rolling_score)
+        return blended_score
+
+    def _rolling_window_stats(self, df: pd.DataFrame, signal_factory, params: dict, strategy_name: str) -> dict:
+        if len(df) < ROLLING_WINDOW_DAYS:
+            return {
+                "rolling_score": float("-inf"),
+                "rolling_ok": False,
+                "rolling_note": "window 부족",
+                "rolling_windows": 0,
+                "rolling_win_ratio": 0.0,
+                "rolling_sharpe_median": 0.0,
+                "rolling_mdd_worst": 0.0,
+                "rolling_score_std": 0.0,
+            }
+
+        backtester = StrategyBacktester()
+        rows = []
+        for start in range(0, len(df) - ROLLING_WINDOW_DAYS + 1, ROLLING_STEP_DAYS):
+            chunk = df.iloc[start : start + ROLLING_WINDOW_DAYS]
+            try:
+                signal_func = signal_factory(params)
+                result = backtester.run_backtest(chunk, signal_func, strategy_name=f"{strategy_name}_roll")
+                m = result.metrics
+                sharpe = float(m.get("Sharpe Ratio", 0.0))
+                ret = float(m.get("Total Return", 0.0))
+                mdd = float(m.get("Max Drawdown", 0.0))
+                rows.append({
+                    "score": self._composite_score(sharpe, ret, mdd),
+                    "ret": ret,
+                    "sharpe": sharpe,
+                    "mdd": mdd,
+                })
+            except Exception:
+                continue
+
+        if not rows:
+            return {
+                "rolling_score": float("-inf"),
+                "rolling_ok": False,
+                "rolling_note": "rolling 계산 실패",
+                "rolling_windows": 0,
+                "rolling_win_ratio": 0.0,
+                "rolling_sharpe_median": 0.0,
+                "rolling_mdd_worst": 0.0,
+                "rolling_score_std": 0.0,
+            }
+
+        wins = sum(1 for r in rows if r["ret"] > 0.0)
+        win_ratio = wins / len(rows)
+        sharpe_median = float(np.median([r["sharpe"] for r in rows]))
+        mdd_worst = float(min(r["mdd"] for r in rows))
+        score_std = float(np.std([r["score"] for r in rows]))
+
+        # 일관성 점수: 승률/중앙 Sharpe 보상, 최악 MDD/변동성 페널티
+        rolling_score = (3.0 * win_ratio) + (0.4 * sharpe_median) - (0.12 * abs(mdd_worst) * 100.0) - (0.1 * score_std)
+        rolling_ok = (len(rows) >= ROLLING_GATE_MIN_WINDOWS) and (win_ratio >= ROLLING_GATE_MIN_WIN_RATIO)
+        rolling_note = (
+            "PASS"
+            if rolling_ok
+            else f"FAIL(windows<{ROLLING_GATE_MIN_WINDOWS} 또는 win_ratio<{ROLLING_GATE_MIN_WIN_RATIO:.2f})"
+        )
+
+        return {
+            "rolling_score": rolling_score,
+            "rolling_ok": rolling_ok,
+            "rolling_note": rolling_note,
+            "rolling_windows": len(rows),
+            "rolling_win_ratio": win_ratio,
+            "rolling_sharpe_median": sharpe_median,
+            "rolling_mdd_worst": mdd_worst,
+            "rolling_score_std": score_std,
+        }
 
     def _parse_params(self):
         raw = self.params_text.get("1.0", tk.END).strip()
@@ -321,10 +450,17 @@ class StrategyBridgeApp:
                 selected_strategy = self.strategy_var.get().strip()
                 selected_params = self._parse_params()
                 periods = ("1mo", "3mo", "6mo", "1y", "2y", "5y")
+                use_rolling = bool(self.use_rolling_var.get())
 
                 backtester = StrategyBacktester()
                 rows = []
                 best_payload = None
+                strategy_params_map = {}
+                for strategy_name in STRATEGY_MAP.keys():
+                    params = DEFAULT_PARAMS.get(strategy_name, {}).copy()
+                    if strategy_name == selected_strategy:
+                        params = selected_params
+                    strategy_params_map[strategy_name] = params
 
                 for period in periods:
                     try:
@@ -335,9 +471,7 @@ class StrategyBridgeApp:
 
                     for strategy_name, signal_factory in STRATEGY_MAP.items():
                         try:
-                            params = DEFAULT_PARAMS.get(strategy_name, {}).copy()
-                            if strategy_name == selected_strategy:
-                                params = selected_params
+                            params = strategy_params_map[strategy_name]
                             signal_func = signal_factory(params)
                             result = backtester.run_backtest(df, signal_func, strategy_name=strategy_name)
                             metrics = result.metrics
@@ -364,7 +498,51 @@ class StrategyBridgeApp:
                 if not ok_rows or best_payload is None:
                     raise RuntimeError("전체 전략×기간 테스트 실패: 성공한 결과가 없습니다.")
 
-                ok_rows.sort(key=lambda x: x["score"], reverse=True)
+                rolling_map = {}
+                if use_rolling:
+                    try:
+                        rolling_df = self._load_data(symbol, "5y")
+                    except Exception:
+                        rolling_df = None
+                    if rolling_df is not None:
+                        for strategy_name, signal_factory in STRATEGY_MAP.items():
+                            rolling_map[strategy_name] = self._rolling_window_stats(
+                                rolling_df,
+                                signal_factory,
+                                strategy_params_map[strategy_name],
+                                strategy_name,
+                            )
+
+                # 전략별 최근(3mo/6mo) 요약 생성 후 점수 보정
+                recent_map = {}
+                for strategy_name in STRATEGY_MAP.keys():
+                    recent_rows = [
+                        r for r in ok_rows if r["name"] == strategy_name and r.get("period") in RECENT_PERIODS
+                    ]
+                    recent_map[strategy_name] = self._recent_summary(recent_rows)
+
+                for row in ok_rows:
+                    summary = recent_map.get(row["name"], {})
+                    row["recent_score"] = summary.get("recent_score", float("-inf"))
+                    row["recent_trades"] = summary.get("recent_trades", 0)
+                    row["recent_ok"] = summary.get("recent_ok", False)
+                    row["gate_note"] = summary.get("recent_note", "unknown")
+                    row["blend_score"] = self._blended_score(row["score"], row["recent_score"])
+                    roll = rolling_map.get(row["name"], {})
+                    row["rolling_score"] = roll.get("rolling_score", float("-inf"))
+                    row["rolling_ok"] = roll.get("rolling_ok", not use_rolling)
+                    row["rolling_note"] = roll.get("rolling_note", "SKIP")
+                    row["rolling_windows"] = roll.get("rolling_windows", 0)
+                    row["rolling_win_ratio"] = roll.get("rolling_win_ratio", 0.0)
+                    row["final_score"] = self._final_score(row["blend_score"], row["rolling_score"], use_rolling)
+                    row["overall_ok"] = bool(row["recent_ok"]) and bool(row["rolling_ok"])
+
+                passed_rows = [r for r in ok_rows if r.get("overall_ok")]
+                if not passed_rows:
+                    raise RuntimeError("전체 전략×기간 테스트 실패: 최근/롤링 게이트를 통과한 전략이 없습니다.")
+
+                passed_rows.sort(key=lambda x: x["final_score"], reverse=True)
+                best_payload = passed_rows[0]
 
                 self.last_df = best_payload["df"]
                 self.last_strategy_name = best_payload["name"]
@@ -373,11 +551,18 @@ class StrategyBridgeApp:
                 out_lines = [
                     "",
                     f"[전체 전략×기간 테스트 완료] {symbol} | periods={','.join(periods)}",
-                    "복합 점수 기준 상위 결과 (Return 반감 + MDD 비선형 페널티):",
+                    (
+                        "최종 점수 기준 상위 결과 "
+                        f"(기본 {int(BASE_WEIGHT*100)}% + 최근 {int(RECENT_WEIGHT*100)}%, "
+                        f"최근 게이트 score>={RECENT_GATE_MIN_SCORE:.2f}, trades>={RECENT_GATE_MIN_TRADES}, "
+                        f"Rolling={'ON' if use_rolling else 'OFF'})"
+                    ),
                 ]
-                for idx, row in enumerate(ok_rows[:20], start=1):
+                for idx, row in enumerate(passed_rows[:20], start=1):
                     out_lines.append(
-                        f"{idx}. [{row['period']}] {row['name']} | Score {row['score']:.3f} | Sharpe {row['sharpe']:.3f} | "
+                        f"{idx}. [{row['period']}] {row['name']} | Final {row['final_score']:.3f} | "
+                        f"Base {row['score']:.3f} | Recent {row['recent_score']:.3f} | "
+                        f"Rolling {row['rolling_score']:.3f} | Sharpe {row['sharpe']:.3f} | "
                         f"Return {row['ret']:.2%} | MDD {row['mdd']:.2%} | Trades {row['trades']}"
                     )
 
@@ -388,10 +573,19 @@ class StrategyBridgeApp:
                     for row in failed[:5]:
                         out_lines.append(f"- [{row.get('period', '-')}] {row.get('name', '-')}: {row['error']}")
 
+                gated_out = [r for r in ok_rows if not r.get("overall_ok")]
+                if gated_out:
+                    out_lines.append("")
+                    out_lines.append(f"게이트 제외 항목: {len(gated_out)}개")
+                    for row in gated_out[:5]:
+                        out_lines.append(
+                            f"- [{row['period']}] {row['name']}: Final {row['final_score']:.3f}, "
+                            f"Recent {row['recent_score']:.3f}({row['gate_note']}), "
+                            f"Rolling {row['rolling_score']:.3f}({row['rolling_note']})"
+                        )
+
                 out_lines.append("")
-                out_lines.append(
-                    f"즉시 적용 대상(최고 점수): [{best_payload['period']}] {best_payload['name']}"
-                )
+                out_lines.append(f"즉시 적용 대상(최고 최종점수): [{best_payload['period']}] {best_payload['name']}")
                 out_lines.append(f"파라미터: {json.dumps(best_payload['params'], ensure_ascii=False)}")
 
                 self.root.after(0, lambda: self._append_output("\n".join(out_lines)))
@@ -412,10 +606,23 @@ class StrategyBridgeApp:
                 period = self.period_var.get().strip()
                 selected_strategy = self.strategy_var.get().strip()
                 selected_params = self._parse_params()
+                use_rolling = bool(self.use_rolling_var.get())
 
                 df = self._load_data(symbol, period)
                 backtester = StrategyBacktester()
                 rows = []
+                recent_df_map = {}
+                for rp in RECENT_PERIODS:
+                    try:
+                        recent_df_map[rp] = self._load_data(symbol, rp)
+                    except Exception:
+                        continue
+                rolling_df = None
+                if use_rolling:
+                    try:
+                        rolling_df = self._load_data(symbol, "5y")
+                    except Exception:
+                        rolling_df = None
 
                 for strategy_name, signal_factory in STRATEGY_MAP.items():
                     try:
@@ -426,16 +633,63 @@ class StrategyBridgeApp:
                         signal_func = signal_factory(params)
                         result = backtester.run_backtest(df, signal_func, strategy_name=strategy_name)
                         metrics = result.metrics
-                        rows.append(
-                            {
-                                "name": strategy_name,
-                                "params": params,
-                                "sharpe": float(metrics.get("Sharpe Ratio", 0.0)),
-                                "ret": float(metrics.get("Total Return", 0.0)),
-                                "mdd": float(metrics.get("Max Drawdown", 0.0)),
-                                "trades": len(result.trades),
-                            }
-                        )
+                        row = {
+                            "name": strategy_name,
+                            "params": params,
+                            "sharpe": float(metrics.get("Sharpe Ratio", 0.0)),
+                            "ret": float(metrics.get("Total Return", 0.0)),
+                            "mdd": float(metrics.get("Max Drawdown", 0.0)),
+                            "trades": len(result.trades),
+                        }
+                        row["score"] = self._composite_score(row["sharpe"], row["ret"], row["mdd"])
+
+                        recent_rows = []
+                        for rp, recent_df in recent_df_map.items():
+                            try:
+                                recent_signal = signal_factory(params)
+                                recent_result = backtester.run_backtest(
+                                    recent_df, recent_signal, strategy_name=f"{strategy_name}_{rp}"
+                                )
+                                recent_metrics = recent_result.metrics
+                                recent_rows.append(
+                                    {
+                                        "period": rp,
+                                        "score": self._composite_score(
+                                            float(recent_metrics.get("Sharpe Ratio", 0.0)),
+                                            float(recent_metrics.get("Total Return", 0.0)),
+                                            float(recent_metrics.get("Max Drawdown", 0.0)),
+                                        ),
+                                        "trades": len(recent_result.trades),
+                                    }
+                                )
+                            except Exception:
+                                continue
+
+                        recent_info = self._recent_summary(recent_rows)
+                        row["recent_score"] = recent_info["recent_score"]
+                        row["recent_trades"] = recent_info["recent_trades"]
+                        row["recent_ok"] = recent_info["recent_ok"]
+                        row["gate_note"] = recent_info["recent_note"]
+                        row["blend_score"] = self._blended_score(row["score"], row["recent_score"])
+
+                        if use_rolling:
+                            if rolling_df is not None:
+                                roll = self._rolling_window_stats(rolling_df, signal_factory, params, strategy_name)
+                            else:
+                                roll = {
+                                    "rolling_score": float("-inf"),
+                                    "rolling_ok": False,
+                                    "rolling_note": "rolling 데이터 없음",
+                                }
+                        else:
+                            roll = {"rolling_score": float("-inf"), "rolling_ok": True, "rolling_note": "SKIP"}
+
+                        row["rolling_score"] = roll.get("rolling_score", float("-inf"))
+                        row["rolling_ok"] = roll.get("rolling_ok", not use_rolling)
+                        row["rolling_note"] = roll.get("rolling_note", "SKIP")
+                        row["final_score"] = self._final_score(row["blend_score"], row["rolling_score"], use_rolling)
+                        row["overall_ok"] = bool(row["recent_ok"]) and bool(row["rolling_ok"])
+                        rows.append(row)
                     except Exception as strategy_exc:
                         rows.append({
                             "name": strategy_name,
@@ -447,10 +701,12 @@ class StrategyBridgeApp:
                 if not ok_rows:
                     raise RuntimeError("전체 전략 테스트 실패: 성공한 전략이 없습니다.")
 
-                for row in ok_rows:
-                    row["score"] = self._composite_score(row["sharpe"], row["ret"], row["mdd"])
-                ok_rows.sort(key=lambda x: x["score"], reverse=True)
-                best = ok_rows[0]
+                passed_rows = [r for r in ok_rows if r.get("overall_ok")]
+                if not passed_rows:
+                    raise RuntimeError("전체 전략 테스트 실패: 최근/롤링 게이트를 통과한 전략이 없습니다.")
+
+                passed_rows.sort(key=lambda x: x["final_score"], reverse=True)
+                best = passed_rows[0]
 
                 self.last_df = df
                 self.last_strategy_name = best["name"]
@@ -459,11 +715,18 @@ class StrategyBridgeApp:
                 out_lines = [
                     "",
                     f"[전체 전략 테스트 완료] {symbol} | {period}",
-                    "복합 점수 기준 상위 결과 (Return 반감 + MDD 비선형 페널티):",
+                    (
+                        "최종 점수 기준 상위 결과 "
+                        f"(기본 {int(BASE_WEIGHT*100)}% + 최근 {int(RECENT_WEIGHT*100)}%, "
+                        f"최근 게이트 score>={RECENT_GATE_MIN_SCORE:.2f}, trades>={RECENT_GATE_MIN_TRADES}, "
+                        f"Rolling={'ON' if use_rolling else 'OFF'})"
+                    ),
                 ]
-                for idx, row in enumerate(ok_rows[:10], start=1):
+                for idx, row in enumerate(passed_rows[:10], start=1):
                     out_lines.append(
-                        f"{idx}. {row['name']} | Score {row['score']:.3f} | Sharpe {row['sharpe']:.3f} | Return {row['ret']:.2%} | "
+                        f"{idx}. {row['name']} | Final {row['final_score']:.3f} | Base {row['score']:.3f} | "
+                        f"Recent {row['recent_score']:.3f} | Rolling {row['rolling_score']:.3f} | "
+                        f"Sharpe {row['sharpe']:.3f} | Return {row['ret']:.2%} | "
                         f"MDD {row['mdd']:.2%} | Trades {row['trades']}"
                     )
 
@@ -474,8 +737,19 @@ class StrategyBridgeApp:
                     for row in failed[:3]:
                         out_lines.append(f"- {row['name']}: {row['error']}")
 
+                gated_out = [r for r in ok_rows if not r.get("overall_ok")]
+                if gated_out:
+                    out_lines.append("")
+                    out_lines.append(f"게이트 제외 전략: {len(gated_out)}개")
+                    for row in gated_out[:5]:
+                        out_lines.append(
+                            f"- {row['name']}: Final {row['final_score']:.3f}, "
+                            f"Recent {row['recent_score']:.3f}({row['gate_note']}), "
+                            f"Rolling {row['rolling_score']:.3f}({row['rolling_note']})"
+                        )
+
                 out_lines.append("")
-                out_lines.append(f"즉시 적용 대상(최고 점수): {best['name']}")
+                out_lines.append(f"즉시 적용 대상(최고 최종점수): {best['name']}")
                 out_lines.append(f"파라미터: {json.dumps(best['params'], ensure_ascii=False)}")
 
                 self.root.after(0, lambda: self._append_output("\n".join(out_lines)))
